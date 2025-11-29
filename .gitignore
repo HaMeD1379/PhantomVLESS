@@ -1,0 +1,29 @@
+# OS / editor files
+.DS_Store
+Thumbs.db
+*~
+*.swp
+.vscode/
+.idea/
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+
+# Shell history and sensitive files
+.bash_history
+.zsh_history
+*.secret
+*.key
+*.pem
+*.crt
+*.cert
+.env
+.env.*
+
+# Backup files
+*.bak
+*.backup
+
