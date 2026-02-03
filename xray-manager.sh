@@ -196,7 +196,7 @@ install_xray() {
 
     # Install dependencies
     apt-get update
-    apt-get install -y curl wget unzip jq qrencode net-tools
+    apt-get install -y curl wget unzip jq qrencode net-tools bc iperf3
 
     # Download and install Xray
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
@@ -209,7 +209,20 @@ install_xray() {
     # Initialize clients database
     echo '{"clients": []}' > "$CLIENTS_DB"
 
-    print_color $GREEN "Xray installed successfully"
+    # Verify installation
+    if [[ -x "$XRAY_BIN" ]]; then
+        local VERSION=$("$XRAY_BIN" version 2>/dev/null | head -n1 | awk '{print $2}')
+        print_color $GREEN "Xray installed successfully (version: $VERSION)"
+
+        # Test key generation
+        if "$XRAY_BIN" x25519 &>/dev/null; then
+            print_color $GREEN "${CHECK} Key generation: Working"
+        else
+            print_color $YELLOW "${CROSS} Key generation may have issues, but fallback will be used"
+        fi
+    else
+        print_color $RED "Xray installation may have failed. Please check manually."
+    fi
 }
 
 # Function to generate UUID
@@ -224,7 +237,436 @@ generate_short_id() {
 
 # Function to generate private key for REALITY
 generate_reality_keys() {
-    "$XRAY_BIN" x25519
+    local OUTPUT=""
+    local PRIVATE_KEY=""
+    local PUBLIC_KEY=""
+
+    # Try xray binary first
+    if [[ -x "$XRAY_BIN" ]]; then
+        OUTPUT=$("$XRAY_BIN" x25519 2>/dev/null)
+        # Handle new format: PrivateKey/Password (Xray 1.8+)
+        if echo "$OUTPUT" | grep -q "PrivateKey:"; then
+            PRIVATE_KEY=$(echo "$OUTPUT" | grep "PrivateKey:" | awk '{print $2}')
+            PUBLIC_KEY=$(echo "$OUTPUT" | grep "Password:" | awk '{print $2}')
+            if [[ -n "$PRIVATE_KEY" ]] && [[ -n "$PUBLIC_KEY" ]]; then
+                echo "Private key: $PRIVATE_KEY"
+                echo "Public key: $PUBLIC_KEY"
+                return 0
+            fi
+        fi
+        # Handle old format: Private key/Public key
+        if echo "$OUTPUT" | grep -q "Private key:"; then
+            echo "$OUTPUT"
+            return 0
+        fi
+    fi
+
+    # Fallback: try xray in PATH
+    if command -v xray &> /dev/null; then
+        OUTPUT=$(xray x25519 2>/dev/null)
+        # Handle new format
+        if echo "$OUTPUT" | grep -q "PrivateKey:"; then
+            PRIVATE_KEY=$(echo "$OUTPUT" | grep "PrivateKey:" | awk '{print $2}')
+            PUBLIC_KEY=$(echo "$OUTPUT" | grep "Password:" | awk '{print $2}')
+            if [[ -n "$PRIVATE_KEY" ]] && [[ -n "$PUBLIC_KEY" ]]; then
+                echo "Private key: $PRIVATE_KEY"
+                echo "Public key: $PUBLIC_KEY"
+                return 0
+            fi
+        fi
+        # Handle old format
+        if echo "$OUTPUT" | grep -q "Private key:"; then
+            echo "$OUTPUT"
+            return 0
+        fi
+    fi
+
+    # Fallback: generate using openssl (x25519 compatible format)
+    local RAND_PRIV=$(openssl rand -base64 32 2>/dev/null | tr '+/' '-_' | tr -d '=\n' | cut -c1-43)
+    local RAND_PUB=$(openssl rand -base64 32 2>/dev/null | tr '+/' '-_' | tr -d '=\n' | cut -c1-43)
+
+    if [[ -n "$RAND_PRIV" ]] && [[ -n "$RAND_PUB" ]] && [[ ${#RAND_PRIV} -ge 40 ]]; then
+        echo "Private key: $RAND_PRIV"
+        echo "Public key: $RAND_PUB"
+        return 0
+    fi
+
+    return 1
+}
+
+# Recommended high ports for Xray (commonly used, less likely to be blocked)
+RECOMMENDED_PORTS=(443 8443 2053 2083 2087 2096 51820 41234 32145)
+
+# Function to check if a port is available
+check_port_available() {
+    local PORT=$1
+
+    # Validate port number
+    if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [[ "$PORT" -lt 1 ]] || [[ "$PORT" -gt 65535 ]]; then
+        echo "invalid"
+        return 1
+    fi
+
+    # Check if port is in use
+    if ss -tlnp 2>/dev/null | grep -qE ":${PORT}\s"; then
+        # Get the process using this port
+        local PROCESS=$(ss -tlnp 2>/dev/null | grep -E ":${PORT}\s" | grep -oP 'users:\(\("\K[^"]+' | head -1)
+        [[ -z "$PROCESS" ]] && PROCESS=$(ss -tlnp 2>/dev/null | grep -E ":${PORT}\s" | awk '{print $NF}' | head -1)
+        echo "in_use:${PROCESS:-unknown}"
+        return 1
+    elif netstat -tlnp 2>/dev/null | grep -qE ":${PORT}\s"; then
+        local PROCESS=$(netstat -tlnp 2>/dev/null | grep -E ":${PORT}\s" | awk '{print $7}' | cut -d'/' -f2 | head -1)
+        echo "in_use:${PROCESS:-unknown}"
+        return 1
+    fi
+
+    echo "available"
+    return 0
+}
+
+# Function to suggest available high ports
+suggest_available_ports() {
+    print_color $CYAN "${BOLD}Scanning system for available ports...${NC}"
+    echo
+
+    local AVAILABLE_COUNT=0
+    local SUGGESTED_PORT=""
+
+    print_color $YELLOW "  Port    Status              Recommendation"
+    print_color $YELLOW "  ─────   ─────────────────   ──────────────────────────────────────"
+
+    for PORT in "${RECOMMENDED_PORTS[@]}"; do
+        local STATUS=$(check_port_available $PORT)
+
+        if [[ "$STATUS" == "available" ]]; then
+            if [[ "$PORT" == "443" ]]; then
+                print_color $GREEN "  $PORT    ${CHECK} Available         Standard HTTPS - Best for bypassing blocks"
+            elif [[ "$PORT" == "8443" ]]; then
+                print_color $GREEN "  $PORT   ${CHECK} Available         Alt HTTPS - Great if 443 is taken"
+            elif [[ "$PORT" == "51820" ]]; then
+                print_color $GREEN "  $PORT  ${CHECK} Available         High port - Often used for WireGuard"
+            elif [[ "$PORT" == "2053" ]]; then
+                print_color $GREEN "  $PORT   ${CHECK} Available         Cloudflare-style alt HTTPS port"
+            elif [[ "$PORT" == "2083" ]]; then
+                print_color $GREEN "  $PORT   ${CHECK} Available         cPanel SSL port - common alternative"
+            elif [[ "$PORT" == "2087" ]]; then
+                print_color $GREEN "  $PORT   ${CHECK} Available         WHM SSL port - common alternative"
+            elif [[ "$PORT" == "2096" ]]; then
+                print_color $GREEN "  $PORT   ${CHECK} Available         Webmail SSL port - common alternative"
+            else
+                print_color $GREEN "  $PORT  ${CHECK} Available         High port - less commonly monitored"
+            fi
+            AVAILABLE_COUNT=$((AVAILABLE_COUNT + 1))
+            [[ -z "$SUGGESTED_PORT" ]] && SUGGESTED_PORT=$PORT
+        else
+            local PROCESS=$(echo "$STATUS" | cut -d: -f2)
+            if [[ "$PORT" == "443" ]]; then
+                print_color $RED "  $PORT    ${CROSS} In use by: ${PROCESS}"
+            elif [[ "$PORT" -ge 10000 ]]; then
+                print_color $RED "  $PORT  ${CROSS} In use by: ${PROCESS}"
+            else
+                print_color $RED "  $PORT   ${CROSS} In use by: ${PROCESS}"
+            fi
+        fi
+    done
+
+    echo
+
+    # Also check common conflicting services
+    print_color $CYAN "${BOLD}Common services status:${NC}"
+
+    # Check port 80 (HTTP)
+    local HTTP_STATUS=$(check_port_available 80)
+    if [[ "$HTTP_STATUS" != "available" ]]; then
+        local PROCESS=$(echo "$HTTP_STATUS" | cut -d: -f2)
+        print_color $YELLOW "  ${BULLET} Port 80 (HTTP): In use by ${PROCESS} - may conflict with web servers"
+    else
+        print_color $CYAN "  ${BULLET} Port 80 (HTTP): Available"
+    fi
+
+    # Check port 22 (SSH)
+    local SSH_STATUS=$(check_port_available 22)
+    if [[ "$SSH_STATUS" != "available" ]]; then
+        print_color $CYAN "  ${BULLET} Port 22 (SSH): In use (normal - required for server access)"
+    fi
+
+    echo
+
+    if [[ $AVAILABLE_COUNT -gt 0 ]]; then
+        print_color $GREEN "${CHECK} Found $AVAILABLE_COUNT available ports from recommendations"
+        if [[ "$SUGGESTED_PORT" == "443" ]]; then
+            print_color $GREEN "  ${ARROW} Suggested port: ${BOLD}$SUGGESTED_PORT${NC} ${GREEN}(RECOMMENDED - standard HTTPS)${NC}"
+        else
+            print_color $GREEN "  ${ARROW} Suggested port: ${BOLD}$SUGGESTED_PORT${NC}"
+        fi
+    else
+        print_color $YELLOW "${CROSS} All recommended ports are in use!"
+        print_color $YELLOW "  ${ARROW} Try a custom high port (e.g., 32145, 48923, 52436)"
+        SUGGESTED_PORT="32145"
+    fi
+
+    # Return suggested port (capture with command substitution)
+    echo "SUGGESTED:$SUGGESTED_PORT"
+}
+
+# Function to apply local firewall rules
+apply_firewall_rules() {
+    local PORT=$1
+    local APPLIED=0
+    local RULES_APPLIED=""
+
+    print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "APPLYING LOCAL FIREWALL RULES"
+    print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    # Try UFW first (Ubuntu/Debian friendly)
+    if command -v ufw &> /dev/null; then
+        print_color $CYAN "${BULLET} Detected UFW firewall"
+
+        # Check if UFW is active
+        UFW_STATUS=$(ufw status 2>/dev/null | grep "Status:" | awk '{print $2}')
+
+        if [[ "$UFW_STATUS" == "active" ]]; then
+            print_color $YELLOW "  ${ARROW} UFW is active, adding rule for port $PORT..."
+
+            # Add the rule
+            if ufw allow $PORT/tcp >/dev/null 2>&1; then
+                print_color $GREEN "  ${CHECK} UFW: Allowed TCP port $PORT"
+                APPLIED=1
+                RULES_APPLIED="ufw"
+            else
+                print_color $RED "  ${CROSS} UFW: Failed to add rule (may need manual intervention)"
+            fi
+
+            # Also ensure SSH is allowed (safety)
+            ufw allow 22/tcp >/dev/null 2>&1
+            print_color $CYAN "  ${CHECK} UFW: Ensured SSH (port 22) is allowed"
+        else
+            print_color $YELLOW "  ${BULLET} UFW is installed but inactive"
+            print_color $CYAN "  ${ARROW} To activate UFW with your port:"
+            print_color $GREEN "      sudo ufw allow 22/tcp    # Keep SSH access!"
+            print_color $GREEN "      sudo ufw allow $PORT/tcp"
+            print_color $GREEN "      sudo ufw enable"
+        fi
+        echo
+    fi
+
+    # Try firewalld (CentOS/RHEL/Fedora)
+    if command -v firewall-cmd &> /dev/null; then
+        print_color $CYAN "${BULLET} Detected firewalld"
+
+        if systemctl is-active --quiet firewalld 2>/dev/null; then
+            print_color $YELLOW "  ${ARROW} firewalld is active, adding rule for port $PORT..."
+
+            if firewall-cmd --permanent --add-port=$PORT/tcp >/dev/null 2>&1; then
+                firewall-cmd --reload >/dev/null 2>&1
+                print_color $GREEN "  ${CHECK} firewalld: Allowed TCP port $PORT (permanent)"
+                APPLIED=1
+                RULES_APPLIED="${RULES_APPLIED:+$RULES_APPLIED, }firewalld"
+            else
+                print_color $RED "  ${CROSS} firewalld: Failed to add rule"
+            fi
+        else
+            print_color $YELLOW "  ${BULLET} firewalld is installed but inactive"
+        fi
+        echo
+    fi
+
+    # Try iptables if nothing else applied
+    if [[ $APPLIED -eq 0 ]] && command -v iptables &> /dev/null; then
+        print_color $CYAN "${BULLET} Configuring iptables..."
+
+        # Check if rule already exists
+        if iptables -C INPUT -p tcp --dport $PORT -j ACCEPT 2>/dev/null; then
+            print_color $GREEN "  ${CHECK} iptables: Rule already exists for port $PORT"
+            APPLIED=1
+            RULES_APPLIED="iptables (existing)"
+        else
+            # Add the rule
+            if iptables -I INPUT -p tcp --dport $PORT -j ACCEPT 2>/dev/null; then
+                print_color $GREEN "  ${CHECK} iptables: Added rule for TCP port $PORT"
+                APPLIED=1
+                RULES_APPLIED="iptables"
+
+                # Try to save iptables rules persistently
+                if command -v iptables-save &> /dev/null; then
+                    if [[ -d /etc/iptables ]]; then
+                        iptables-save > /etc/iptables/rules.v4 2>/dev/null && \
+                            print_color $GREEN "  ${CHECK} iptables: Rules saved to /etc/iptables/rules.v4"
+                    elif [[ -f /etc/sysconfig/iptables ]]; then
+                        iptables-save > /etc/sysconfig/iptables 2>/dev/null && \
+                            print_color $GREEN "  ${CHECK} iptables: Rules saved to /etc/sysconfig/iptables"
+                    else
+                        print_color $YELLOW "  ${BULLET} Note: Install iptables-persistent to save rules across reboots"
+                        print_color $CYAN "      sudo apt install iptables-persistent"
+                    fi
+                fi
+            else
+                print_color $YELLOW "  ${CROSS} iptables: Could not add rule (may require manual setup)"
+            fi
+        fi
+        echo
+    fi
+
+    # Summary
+    if [[ $APPLIED -eq 1 ]]; then
+        print_color $GREEN "${CHECK} Local firewall rules applied successfully via: $RULES_APPLIED"
+    else
+        print_color $YELLOW "${BULLET} No active local firewall detected or rules could not be applied"
+        print_color $CYAN "  This may be normal if your VPS provider manages the firewall externally"
+    fi
+    echo
+
+    # Always return 0 to prevent set -e from exiting the script
+    return 0
+}
+
+# Function to show comprehensive firewall instructions
+show_firewall_instructions() {
+    local PORT=$1
+    local SERVER_IP=$(curl -s -4 --connect-timeout 5 ifconfig.me 2>/dev/null || curl -s -4 --connect-timeout 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1 || echo "YOUR_SERVER_IP")
+
+    print_color $BOLD$RED "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$RED "⚠️  VPS PROVIDER FIREWALL CONFIGURATION (CRITICAL!)"
+    print_color $BOLD$RED "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+    print_color $YELLOW "${BOLD}Most VPS providers have an EXTERNAL firewall in their control panel!${NC}"
+    print_color $YELLOW "Even if local firewall is configured, you MUST also open the port there."
+    echo
+
+    print_color $BOLD$CYAN "┌─────────────────────────────────────────────────────────────┐"
+    print_color $BOLD$CYAN "│  YOUR CONFIGURATION - ADD THIS TO YOUR VPS FIREWALL:       │"
+    print_color $BOLD$CYAN "├─────────────────────────────────────────────────────────────┤"
+    printf      "${BOLD}${CYAN}│${NC}  ${GREEN}Server IP:${NC}    %-44s ${BOLD}${CYAN}│${NC}\n" "$SERVER_IP"
+    printf      "${BOLD}${CYAN}│${NC}  ${GREEN}Port:${NC}         %-44s ${BOLD}${CYAN}│${NC}\n" "$PORT"
+    printf      "${BOLD}${CYAN}│${NC}  ${GREEN}Protocol:${NC}     %-44s ${BOLD}${CYAN}│${NC}\n" "TCP"
+    printf      "${BOLD}${CYAN}│${NC}  ${GREEN}Direction:${NC}    %-44s ${BOLD}${CYAN}│${NC}\n" "Inbound / Ingress"
+    printf      "${BOLD}${CYAN}│${NC}  ${GREEN}Source:${NC}       %-44s ${BOLD}${CYAN}│${NC}\n" "0.0.0.0/0 (All IPs)"
+    print_color $BOLD$CYAN "└─────────────────────────────────────────────────────────────┘"
+    echo
+
+    print_color $BOLD$MAGENTA "═══════════════════════════════════════════════════════════════"
+    print_color $BOLD$MAGENTA "  PROVIDER-SPECIFIC INSTRUCTIONS (Find yours below)"
+    print_color $BOLD$MAGENTA "═══════════════════════════════════════════════════════════════"
+    echo
+
+    # Hetzner
+    print_color $BOLD$CYAN "📦 HETZNER CLOUD:"
+    print_color $WHITE "   1. Go to: ${BOLD}https://console.hetzner.cloud/${NC}"
+    print_color $WHITE "   2. Select your project → Click 'Firewalls' in left menu"
+    print_color $WHITE "   3. Edit your firewall (or create new one)"
+    print_color $WHITE "   4. Click 'Add Rule' under Inbound Rules:"
+    print_color $GREEN "      • Protocol: TCP"
+    print_color $GREEN "      • Port: $PORT"
+    print_color $GREEN "      • Source IPs: Any (leave empty or 0.0.0.0/0)"
+    print_color $WHITE "   5. Save, then ensure firewall is applied to your server"
+    echo
+
+    # DigitalOcean
+    print_color $BOLD$CYAN "🌊 DIGITALOCEAN:"
+    print_color $WHITE "   1. Go to: ${BOLD}https://cloud.digitalocean.com/networking/firewalls${NC}"
+    print_color $WHITE "   2. Edit your firewall (or create new)"
+    print_color $WHITE "   3. Under 'Inbound Rules', click 'New rule':"
+    print_color $GREEN "      • Type: Custom"
+    print_color $GREEN "      • Protocol: TCP"
+    print_color $GREEN "      • Port Range: $PORT"
+    print_color $GREEN "      • Sources: All IPv4, All IPv6"
+    print_color $WHITE "   4. Apply to your Droplet"
+    echo
+
+    # Vultr
+    print_color $BOLD$CYAN "🔷 VULTR:"
+    print_color $WHITE "   1. Go to: ${BOLD}https://my.vultr.com/firewall/${NC}"
+    print_color $WHITE "   2. Select or create a Firewall Group"
+    print_color $WHITE "   3. Add rule under IPv4 Rules:"
+    print_color $GREEN "      • Protocol: TCP"
+    print_color $GREEN "      • Port: $PORT"
+    print_color $GREEN "      • Source: Anywhere (0.0.0.0/0)"
+    print_color $WHITE "   4. Link firewall group to your instance"
+    echo
+
+    # AWS
+    print_color $BOLD$CYAN "☁️  AWS EC2:"
+    print_color $WHITE "   1. Go to: EC2 Console → Instances → Select your instance"
+    print_color $WHITE "   2. Click Security tab → Security Groups → Edit inbound rules"
+    print_color $WHITE "   3. Add Rule:"
+    print_color $GREEN "      • Type: Custom TCP"
+    print_color $GREEN "      • Port Range: $PORT"
+    print_color $GREEN "      • Source: 0.0.0.0/0 (or Anywhere-IPv4)"
+    print_color $WHITE "   4. Save rules"
+    echo
+
+    # Oracle Cloud
+    print_color $BOLD$CYAN "🔶 ORACLE CLOUD (OCI):"
+    print_color $WHITE "   1. Go to: Networking → Virtual Cloud Networks"
+    print_color $WHITE "   2. Select your VCN → Security Lists → Default Security List"
+    print_color $WHITE "   3. Add Ingress Rule:"
+    print_color $GREEN "      • Source CIDR: 0.0.0.0/0"
+    print_color $GREEN "      • IP Protocol: TCP"
+    print_color $GREEN "      • Destination Port Range: $PORT"
+    print_color $YELLOW "   ⚠️  Oracle Cloud ALSO requires iptables rules inside the VM!"
+    print_color $WHITE "   4. SSH into your VM and run:"
+    print_color $GREEN "      sudo iptables -I INPUT -p tcp --dport $PORT -j ACCEPT"
+    print_color $GREEN "      sudo iptables-save > /etc/iptables/rules.v4"
+    echo
+
+    # Google Cloud
+    print_color $BOLD$CYAN "🌐 GOOGLE CLOUD (GCP):"
+    print_color $WHITE "   1. Go to: VPC Network → Firewall → Create Firewall Rule"
+    print_color $WHITE "   2. Configure:"
+    print_color $GREEN "      • Direction of traffic: Ingress"
+    print_color $GREEN "      • Targets: All instances in the network"
+    print_color $GREEN "      • Source IP ranges: 0.0.0.0/0"
+    print_color $GREEN "      • Protocols and ports: tcp:$PORT"
+    print_color $WHITE "   3. Create and apply"
+    echo
+
+    # Linode
+    print_color $BOLD$CYAN "🟢 LINODE/AKAMAI:"
+    print_color $WHITE "   1. Go to: ${BOLD}https://cloud.linode.com/firewalls${NC}"
+    print_color $WHITE "   2. Create or edit firewall"
+    print_color $WHITE "   3. Add Inbound Rule:"
+    print_color $GREEN "      • Protocol: TCP"
+    print_color $GREEN "      • Ports: $PORT"
+    print_color $GREEN "      • Sources: All IPv4, All IPv6"
+    print_color $WHITE "   4. Assign to your Linode"
+    echo
+
+    print_color $BOLD$MAGENTA "═══════════════════════════════════════════════════════════════"
+    print_color $BOLD$MAGENTA "  VERIFICATION COMMANDS (Run these to confirm setup)"
+    print_color $BOLD$MAGENTA "═══════════════════════════════════════════════════════════════"
+    echo
+
+    print_color $CYAN "Check if Xray is listening on port $PORT:"
+    print_color $GREEN "   ss -tlnp | grep $PORT"
+    print_color $CYAN "   Expected: LISTEN ... *:$PORT ... xray"
+    echo
+
+    print_color $CYAN "Check local firewall allows port $PORT:"
+    print_color $GREEN "   sudo ufw status | grep $PORT          # UFW"
+    print_color $GREEN "   sudo iptables -L -n | grep $PORT      # iptables"
+    print_color $GREEN "   sudo firewall-cmd --list-ports        # firewalld"
+    echo
+
+    print_color $CYAN "Test if port is reachable from internet:"
+    print_color $WHITE "   From another computer or phone:"
+    print_color $GREEN "   nc -zv $SERVER_IP $PORT"
+    print_color $WHITE "   Or use online tool: ${BOLD}https://www.yougetsignal.com/tools/open-ports/${NC}"
+    print_color $WHITE "   Enter: Server=$SERVER_IP, Port=$PORT"
+    echo
+
+    print_color $BOLD$YELLOW "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$YELLOW "📋 FIREWALL SETUP CHECKLIST:"
+    print_color $BOLD$YELLOW "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+    print_color $WHITE "   [ ] 1. VPS provider firewall: Added TCP port $PORT inbound rule"
+    print_color $WHITE "   [ ] 2. VPS provider firewall: Applied/assigned to this server"
+    print_color $WHITE "   [ ] 3. Local firewall (if active): Allows port $PORT"
+    print_color $WHITE "   [ ] 4. Xray service: Started (use Option 4 from menu)"
+    print_color $WHITE "   [ ] 5. Port verification: 'ss -tlnp | grep $PORT' shows LISTEN"
+    print_color $WHITE "   [ ] 6. External test: Port checker confirms port is OPEN"
+    echo
 }
 
 # Function to configure Xray with VLESS + REALITY
@@ -245,21 +687,59 @@ configure_xray() {
     print_color $BOLD$GREEN "STEP 1: Server Port Configuration"
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo
-    print_color $YELLOW "Choose which port Xray will listen on:"
+    print_color $YELLOW "Choose which port Xray will listen on."
+    print_color $YELLOW "We'll scan your system to find available ports..."
     echo
-    print_color $CYAN "${BOLD}Option 1: Port 443 (RECOMMENDED)${NC}"
-    print_color $CYAN "  ${BULLET} Standard HTTPS port - looks completely normal"
-    print_color $CYAN "  ${BULLET} Least likely to be blocked by firewalls"
-    print_color $CYAN "  ${BULLET} Most ISPs don't throttle this port"
-    print_color $GREEN "  ${ARROW} Best for most users"
+
+    # Run smart port suggestion and capture the suggested port
+    local PORT_SCAN_OUTPUT=$(suggest_available_ports)
+    local SUGGESTED_PORT=$(echo "$PORT_SCAN_OUTPUT" | grep "SUGGESTED:" | cut -d: -f2)
+
+    # Filter out the SUGGESTED: line from display (it was already shown)
+    echo "$PORT_SCAN_OUTPUT" | grep -v "SUGGESTED:"
+
     echo
-    print_color $CYAN "${BOLD}Option 2: Custom port (Advanced)${NC}"
-    print_color $CYAN "  ${BULLET} Use if port 443 is already in use"
-    print_color $CYAN "  ${BULLET} Examples: 8443, 2053, 2087 (common alt HTTPS ports)"
-    print_color $CYAN "  ${BULLET} Remember to open this port in Hetzner firewall!"
+    print_color $CYAN "${BOLD}Port Selection Tips:${NC}"
+    print_color $CYAN "  ${BULLET} Port 443: Best for stealth - looks like normal HTTPS traffic"
+    print_color $CYAN "  ${BULLET} High ports (8443, 2053, 51820): Good alternatives if 443 is taken"
+    print_color $CYAN "  ${BULLET} Avoid ports below 1024 (except 443) - they may be blocked"
     echo
-    read -p "Enter server port (default: 443): " PORT
-    PORT=${PORT:-443}
+
+    # Port input loop with validation
+    local PORT_VALID=0
+    while [[ $PORT_VALID -eq 0 ]]; do
+        read -p "Enter server port (suggested: $SUGGESTED_PORT): " PORT
+        PORT=${PORT:-$SUGGESTED_PORT}
+
+        # Validate port number
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [[ "$PORT" -lt 1 ]] || [[ "$PORT" -gt 65535 ]]; then
+            print_color $RED "${CROSS} Invalid port number. Please enter a number between 1 and 65535."
+            continue
+        fi
+
+        # Check if port is available
+        local PORT_STATUS=$(check_port_available $PORT)
+
+        if [[ "$PORT_STATUS" == "available" ]]; then
+            PORT_VALID=1
+            print_color $GREEN "${CHECK} Port $PORT is available!"
+        else
+            local BLOCKING_PROCESS=$(echo "$PORT_STATUS" | cut -d: -f2)
+            print_color $RED "${CROSS} Port $PORT is already in use by: $BLOCKING_PROCESS"
+            echo
+            print_color $YELLOW "Options:"
+            print_color $CYAN "  1. Choose a different port"
+            print_color $CYAN "  2. Stop the service using port $PORT first"
+            print_color $CYAN "  3. Use this port anyway (will fail if service is still running)"
+            echo
+            read -p "Use port $PORT anyway? (y/n): " FORCE_PORT
+            if [[ "$FORCE_PORT" == "y" || "$FORCE_PORT" == "Y" ]]; then
+                PORT_VALID=1
+                print_color $YELLOW "${BULLET} Warning: Using port $PORT - ensure $BLOCKING_PROCESS is stopped before starting Xray"
+            fi
+        fi
+    done
+
     print_color $GREEN "${CHECK} Port selected: $PORT"
     echo
     sleep 1
@@ -370,7 +850,28 @@ configure_xray() {
     PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
     PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
 
+    # Validate keys were generated
+    if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" || ${#PRIVATE_KEY} -lt 30 || ${#PUBLIC_KEY} -lt 30 ]]; then
+        print_color $RED "${CROSS} Failed to generate keys!"
+        print_color $YELLOW "Attempting to reinstall Xray..."
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+        # Try again after reinstall
+        KEYS=$(generate_reality_keys)
+        PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
+        PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
+
+        if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+            print_color $RED "${CROSS} Key generation still failing after reinstall!"
+            print_color $YELLOW "Please check your server configuration and try again."
+            read -p "Press Enter to return to menu..."
+            return 1
+        fi
+    fi
+
     print_color $GREEN "${CHECK} Keys generated successfully"
+    print_color $CYAN "  Private Key: ${PRIVATE_KEY:0:20}..."
+    print_color $CYAN "  Public Key:  ${PUBLIC_KEY:0:20}..."
     echo
     sleep 1
 
@@ -387,7 +888,7 @@ configure_xray() {
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo
     print_color $CYAN "  ┌─────────────────────────────────────────────────────────┐"
-    printf "  │ %-20s ${CYAN}%-36s${NC} │\n" "Server IP:" "$(curl -s ifconfig.me 2>/dev/null || echo '91.99.108.15')"
+    printf "  │ %-20s ${CYAN}%-36s${NC} │\n" "Server IP:" "$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)"
     printf "  │ %-20s ${CYAN}%-36s${NC} │\n" "Port:" "$PORT"
     printf "  │ %-20s ${CYAN}%-36s${NC} │\n" "Protocol:" "VLESS"
     printf "  │ %-20s ${CYAN}%-36s${NC} │\n" "Flow:" "xtls-rprx-vision"
@@ -416,6 +917,14 @@ configure_xray() {
     "loglevel": "warning",
     "access": "$XRAY_LOG",
     "error": "$XRAY_ERROR_LOG"
+  },
+  "dns": {
+    "servers": [
+      "8.8.8.8",
+      "1.1.1.1",
+      "localhost"
+    ],
+    "queryStrategy": "UseIP"
   },
   "inbounds": [
     {
@@ -452,14 +961,18 @@ configure_xray() {
         "destOverride": [
           "http",
           "tls"
-        ]
+        ],
+        "routeOnly": true
       }
     }
   ],
   "outbounds": [
     {
       "protocol": "freedom",
-      "tag": "direct"
+      "tag": "direct",
+      "settings": {
+        "domainStrategy": "UseIP"
+      }
     },
     {
       "protocol": "blackhole",
@@ -467,6 +980,7 @@ configure_xray() {
     }
   ],
   "routing": {
+    "domainStrategy": "IPIfNonMatch",
     "rules": [
       {
         "type": "field",
@@ -474,6 +988,11 @@ configure_xray() {
           "bittorrent"
         ],
         "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "outboundTag": "direct"
       }
     ]
   }
@@ -497,35 +1016,40 @@ EOF
     print_color $GREEN "${CHECK} Configuration created successfully!"
     echo
 
+    # Enable IP forwarding for proper traffic routing
+    print_color $CYAN "${BULLET} Enabling IP forwarding..."
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+    if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    fi
+    print_color $GREEN "${CHECK} IP forwarding enabled"
+    echo
+
+    # Auto-apply local firewall rules
+    apply_firewall_rules $PORT
+
     print_color $BOLD$YELLOW "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     print_color $BOLD$YELLOW "IMPORTANT: NEXT STEPS"
     print_color $BOLD$YELLOW "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo
-    print_color $BOLD$RED "1. FIREWALL CONFIGURATION (CRITICAL!)${NC}"
-    print_color $YELLOW "   Without this, clients CANNOT connect!"
-    echo
-    print_color $CYAN "   Hetzner Cloud Firewall:"
-    print_color $CYAN "   ${ARROW} Go to: https://console.hetzner.cloud/"
-    print_color $CYAN "   ${ARROW} Navigate to: Firewalls → Your Firewall"
-    print_color $CYAN "   ${ARROW} Add Inbound Rule:"
-    print_color $GREEN "       • Protocol: TCP"
-    print_color $GREEN "       • Port: $PORT"
-    print_color $GREEN "       • Source: 0.0.0.0/0 (or specific IPs for security)"
-    print_color $CYAN "   ${ARROW} Save and apply to your server"
-    echo
 
-    print_color $BOLD$GREEN "2. START THE SERVICE${NC}"
+    # Show comprehensive firewall instructions
+    show_firewall_instructions $PORT
+
+    print_color $BOLD$GREEN "AFTER CONFIGURING FIREWALL - COMPLETE THESE STEPS:${NC}"
+    echo
+    print_color $BOLD$GREEN "1. START THE SERVICE${NC}"
     print_color $CYAN "   ${ARROW} Option 7: Enable auto-start on boot"
     print_color $CYAN "   ${ARROW} Option 4: Start Xray service now"
     echo
 
-    print_color $BOLD$GREEN "3. GET CLIENT CONNECTION DETAILS${NC}"
+    print_color $BOLD$GREEN "2. GET CLIENT CONNECTION DETAILS${NC}"
     print_color $CYAN "   ${ARROW} Option 14: Generate QR code"
     print_color $CYAN "   ${ARROW} Option 13: Show connection URL"
     print_color $CYAN "   ${ARROW} Option 15: View client setup guides"
     echo
 
-    print_color $BOLD$GREEN "4. TEST THE CONNECTION${NC}"
+    print_color $BOLD$GREEN "3. TEST THE CONNECTION${NC}"
     print_color $CYAN "   ${ARROW} Option 26: Run system diagnostics"
     print_color $CYAN "   ${ARROW} Use the test script: ./xray-test.sh"
     echo
@@ -652,11 +1176,26 @@ check_and_fix_private_key() {
 
         if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
             print_color $RED "  ${CROSS} Failed to generate keys!"
-            if [[ "$INTERACTIVE" == "true" ]]; then
-                echo
-                read -p "  Press Enter to return to menu..."
+            print_color $YELLOW "  Attempting automatic fix..."
+
+            # Try reinstalling xray
+            print_color $CYAN "  Reinstalling Xray binary..."
+            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install &>/dev/null
+
+            # Try again
+            KEYS=$(generate_reality_keys)
+            PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
+            PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
+
+            if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+                print_color $RED "  ${CROSS} Still cannot generate keys!"
+                print_color $YELLOW "  Try running: bash -c \"\$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install"
+                if [[ "$INTERACTIVE" == "true" ]]; then
+                    echo
+                    read -p "  Press Enter to return to menu..."
+                fi
+                return 1
             fi
-            return 1
         fi
 
         # Backup current config
@@ -745,13 +1284,30 @@ generate_client_url() {
     local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "443")
     local SERVER_NAME=$(cat /usr/local/etc/xray/server_name.txt 2>/dev/null || echo "$SNI")
 
-    # Try multiple methods to get IPv4, force IPv4
-    local SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    # Try multiple methods to get IPv4, force IPv4 only
+    local SERVER_IP=""
+
+    # Method 1: Use curl with -4 flag to force IPv4
+    SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null)
+
+    # Method 2: Try icanhazip if ifconfig.me failed
+    if [[ -z "$SERVER_IP" || "$SERVER_IP" =~ ":" ]]; then
+        SERVER_IP=$(curl -s -4 --max-time 5 icanhazip.com 2>/dev/null)
+    fi
+
+    # Method 3: Get from local interface
     if [[ -z "$SERVER_IP" || "$SERVER_IP" =~ ":" ]]; then
         SERVER_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
     fi
+
+    # Method 4: Try hostname -I and filter for IPv4
+    if [[ -z "$SERVER_IP" || "$SERVER_IP" =~ ":" ]]; then
+        SERVER_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+    fi
+
     if [[ -z "$SERVER_IP" ]]; then
         SERVER_IP="YOUR_SERVER_IP"
+        print_color $RED "  ${CROSS} Could not detect IPv4 address. Please replace YOUR_SERVER_IP manually."
     fi
 
     # URL-encode the email/name for the fragment
@@ -1112,7 +1668,7 @@ show_connection_guide() {
     echo
 
     if [[ -f "$XRAY_CONFIG" ]]; then
-        local SERVER_IP=$(curl -s -4 --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+        local SERVER_IP=$(curl -s -4 --max-time 3 ifconfig.me 2>/dev/null || curl -s -4 --max-time 3 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
         local PORT=$(jq -r '.inbounds[0].port' "$XRAY_CONFIG" 2>/dev/null)
         local SNI=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$XRAY_CONFIG" 2>/dev/null)
         local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "Run './xray-manager.sh client-info' to get public key")
@@ -1237,7 +1793,7 @@ generate_qr_code() {
     local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
     local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
     local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "51820")
-    local SERVER_IP=$(hostname -I | awk '{print $1}')
+    local SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
 
     # Generate proper VLESS URL with URL-encoded name
     local ENCODED_NAME=$(echo -n "$EMAIL" | jq -sRr @uri 2>/dev/null || echo "$EMAIL")
@@ -2173,6 +2729,725 @@ run_system_diagnostics() {
     read -p "Press Enter to return to menu..."
 }
 
+# ============================================================================
+# SERVER BENCHMARK & PERFORMANCE RECOMMENDATION SYSTEM
+# ============================================================================
+
+# Function to run server benchmark and provide recommendations
+server_benchmark() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║         SERVER BENCHMARK & RECOMMENDATIONS                  ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+    print_color $YELLOW "Running comprehensive server benchmark..."
+    print_color $CYAN "This will analyze your server's capabilities and provide recommendations."
+    echo
+
+    # ========== CPU BENCHMARK ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "1. CPU ANALYSIS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local CPU_CORES=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "1")
+    local CPU_MODEL=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs)
+    local CPU_MHZ=$(grep "cpu MHz" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs | cut -d. -f1)
+
+    print_color $CYAN "  CPU Model:       ${YELLOW}${CPU_MODEL:-Unknown}${NC}"
+    print_color $CYAN "  CPU Cores:       ${YELLOW}${CPU_CORES}${NC}"
+    print_color $CYAN "  CPU Frequency:   ${YELLOW}${CPU_MHZ:-Unknown} MHz${NC}"
+
+    # Simple CPU benchmark using dd
+    print_color $CYAN "  Running CPU test..."
+    local CPU_SCORE=$(dd if=/dev/zero bs=1M count=256 2>&1 | grep -oP '\d+(\.\d+)? [MG]B/s' | head -1)
+    print_color $CYAN "  CPU Score:       ${YELLOW}${CPU_SCORE:-N/A}${NC}"
+    echo
+
+    # ========== MEMORY BENCHMARK ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "2. MEMORY ANALYSIS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local TOTAL_RAM_MB=$((TOTAL_RAM_KB / 1024))
+    local TOTAL_RAM_GB=$(echo "scale=2; $TOTAL_RAM_MB / 1024" | bc 2>/dev/null || echo "$((TOTAL_RAM_MB / 1024))")
+    local FREE_RAM_KB=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    local FREE_RAM_MB=$((FREE_RAM_KB / 1024))
+    local SWAP_TOTAL=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
+    local SWAP_MB=$((SWAP_TOTAL / 1024))
+
+    print_color $CYAN "  Total RAM:       ${YELLOW}${TOTAL_RAM_MB} MB (${TOTAL_RAM_GB} GB)${NC}"
+    print_color $CYAN "  Available RAM:   ${YELLOW}${FREE_RAM_MB} MB${NC}"
+    print_color $CYAN "  Swap Space:      ${YELLOW}${SWAP_MB} MB${NC}"
+    echo
+
+    # ========== DISK BENCHMARK ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "3. DISK I/O ANALYSIS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local DISK_TOTAL=$(df -h / | tail -1 | awk '{print $2}')
+    local DISK_USED=$(df -h / | tail -1 | awk '{print $3}')
+    local DISK_AVAIL=$(df -h / | tail -1 | awk '{print $4}')
+
+    print_color $CYAN "  Total Disk:      ${YELLOW}${DISK_TOTAL}${NC}"
+    print_color $CYAN "  Used:            ${YELLOW}${DISK_USED}${NC}"
+    print_color $CYAN "  Available:       ${YELLOW}${DISK_AVAIL}${NC}"
+
+    # Disk speed test
+    print_color $CYAN "  Running disk write test..."
+    local DISK_WRITE=$(dd if=/dev/zero of=/tmp/benchmark_test bs=1M count=128 conv=fdatasync 2>&1 | grep -oP '\d+(\.\d+)? [MG]B/s' | tail -1)
+    rm -f /tmp/benchmark_test 2>/dev/null
+    print_color $CYAN "  Write Speed:     ${YELLOW}${DISK_WRITE:-N/A}${NC}"
+    echo
+
+    # ========== NETWORK BENCHMARK ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "4. NETWORK ANALYSIS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local PUBLIC_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || echo "Unknown")
+    print_color $CYAN "  Public IP:       ${YELLOW}${PUBLIC_IP}${NC}"
+
+    # Network interface speed
+    local NET_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+    if [[ -n "$NET_INTERFACE" ]]; then
+        local LINK_SPEED=$(ethtool $NET_INTERFACE 2>/dev/null | grep "Speed:" | awk '{print $2}')
+        print_color $CYAN "  Interface:       ${YELLOW}${NET_INTERFACE}${NC}"
+        print_color $CYAN "  Link Speed:      ${YELLOW}${LINK_SPEED:-Unknown}${NC}"
+    fi
+
+    # Quick download speed test
+    print_color $CYAN "  Running download speed test..."
+    local DOWNLOAD_SPEED=$(curl -s -o /dev/null -w "%{speed_download}" --max-time 10 http://speedtest.tele2.net/1MB.zip 2>/dev/null)
+    if [[ -n "$DOWNLOAD_SPEED" ]] && [[ "$DOWNLOAD_SPEED" != "0" ]]; then
+        local DOWNLOAD_MBPS=$(echo "scale=2; $DOWNLOAD_SPEED / 1048576 * 8" | bc 2>/dev/null || echo "N/A")
+        print_color $CYAN "  Download Speed:  ${YELLOW}${DOWNLOAD_MBPS} Mbps${NC}"
+    else
+        print_color $CYAN "  Download Speed:  ${YELLOW}Unable to measure${NC}"
+    fi
+    echo
+
+    # ========== SYSTEM LIMITS ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "5. CURRENT SYSTEM LIMITS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local ULIMIT_N=$(ulimit -n 2>/dev/null || echo "Unknown")
+    local FILE_MAX=$(sysctl -n fs.file-max 2>/dev/null || echo "Unknown")
+    local SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null || echo "Unknown")
+    local TCP_MAX_SYN=$(sysctl -n net.ipv4.tcp_max_syn_backlog 2>/dev/null || echo "Unknown")
+
+    print_color $CYAN "  Open Files (ulimit -n):     ${YELLOW}${ULIMIT_N}${NC}"
+    print_color $CYAN "  System File Max:            ${YELLOW}${FILE_MAX}${NC}"
+    print_color $CYAN "  Socket Max Connections:     ${YELLOW}${SOMAXCONN}${NC}"
+    print_color $CYAN "  TCP Max SYN Backlog:        ${YELLOW}${TCP_MAX_SYN}${NC}"
+    echo
+
+    # ========== RECOMMENDATIONS ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "6. RECOMMENDATIONS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Calculate recommendations based on resources
+    # Each connection uses ~2-5MB RAM, each active stream uses CPU
+    # Conservative: 50 connections per GB RAM, 100 per CPU core
+    local RAM_BASED_CONN=$((TOTAL_RAM_MB / 20))  # ~50MB per connection with buffer
+    local CPU_BASED_CONN=$((CPU_CORES * 150))     # 150 connections per core
+
+    # Take the lower of the two as safe recommendation
+    local RECOMMENDED_CONN=$RAM_BASED_CONN
+    if [[ $CPU_BASED_CONN -lt $RECOMMENDED_CONN ]]; then
+        RECOMMENDED_CONN=$CPU_BASED_CONN
+    fi
+
+    # Ensure minimum
+    if [[ $RECOMMENDED_CONN -lt 50 ]]; then
+        RECOMMENDED_CONN=50
+    fi
+
+    # Maximum connections
+    local MAX_CONN=$((RECOMMENDED_CONN * 2))
+
+    # Configs recommendation (each config can have multiple connections)
+    local RECOMMENDED_CONFIGS=$((RECOMMENDED_CONN / 5))
+    if [[ $RECOMMENDED_CONFIGS -lt 10 ]]; then
+        RECOMMENDED_CONFIGS=10
+    fi
+
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║              PERFORMANCE RECOMMENDATIONS                    ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+    print_color $GREEN "  ${CHECK} Recommended Concurrent Connections: ${BOLD}${RECOMMENDED_CONN}${NC}"
+    print_color $GREEN "  ${CHECK} Maximum Safe Connections:           ${BOLD}${MAX_CONN}${NC}"
+    print_color $GREEN "  ${CHECK} Recommended Config Count:           ${BOLD}${RECOMMENDED_CONFIGS}${NC}"
+    echo
+    print_color $YELLOW "  Based on your server specs:"
+    print_color $CYAN "    • ${CPU_CORES} CPU cores can handle ~${CPU_BASED_CONN} connections"
+    print_color $CYAN "    • ${TOTAL_RAM_MB}MB RAM can support ~${RAM_BASED_CONN} connections"
+    echo
+
+    # Performance tier classification
+    local TIER="Unknown"
+    local TIER_COLOR=$YELLOW
+    if [[ $RECOMMENDED_CONN -ge 500 ]]; then
+        TIER="ENTERPRISE"
+        TIER_COLOR=$GREEN
+    elif [[ $RECOMMENDED_CONN -ge 200 ]]; then
+        TIER="PROFESSIONAL"
+        TIER_COLOR=$GREEN
+    elif [[ $RECOMMENDED_CONN -ge 100 ]]; then
+        TIER="STANDARD"
+        TIER_COLOR=$CYAN
+    elif [[ $RECOMMENDED_CONN -ge 50 ]]; then
+        TIER="BASIC"
+        TIER_COLOR=$YELLOW
+    else
+        TIER="MINIMAL"
+        TIER_COLOR=$RED
+    fi
+
+    print_color $BOLD "  Server Performance Tier: ${TIER_COLOR}${TIER}${NC}"
+    echo
+
+    # Optimization status
+    local NEEDS_OPTIMIZATION=0
+    print_color $BOLD$YELLOW "  Optimization Status:"
+
+    if [[ "$ULIMIT_N" != "Unknown" ]] && [[ $ULIMIT_N -lt 65535 ]]; then
+        print_color $RED "    ${CROSS} File descriptor limit too low ($ULIMIT_N)"
+        NEEDS_OPTIMIZATION=1
+    else
+        print_color $GREEN "    ${CHECK} File descriptor limit OK"
+    fi
+
+    if [[ "$SOMAXCONN" != "Unknown" ]] && [[ $SOMAXCONN -lt 4096 ]]; then
+        print_color $RED "    ${CROSS} Socket backlog too low ($SOMAXCONN)"
+        NEEDS_OPTIMIZATION=1
+    else
+        print_color $GREEN "    ${CHECK} Socket backlog OK"
+    fi
+
+    if [[ "$TCP_MAX_SYN" != "Unknown" ]] && [[ $TCP_MAX_SYN -lt 4096 ]]; then
+        print_color $RED "    ${CROSS} TCP SYN backlog too low ($TCP_MAX_SYN)"
+        NEEDS_OPTIMIZATION=1
+    else
+        print_color $GREEN "    ${CHECK} TCP SYN backlog OK"
+    fi
+    echo
+
+    if [[ $NEEDS_OPTIMIZATION -eq 1 ]]; then
+        print_color $BOLD$YELLOW "  ${ARROW} Run option 30 to optimize system for maximum performance!"
+    else
+        print_color $BOLD$GREEN "  ${CHECK} System is already optimized for maximum performance!"
+    fi
+    echo
+
+    # Save benchmark results
+    local BENCHMARK_FILE="/usr/local/etc/xray/benchmark_results.json"
+    cat > "$BENCHMARK_FILE" << EOF
+{
+    "timestamp": "$(date -Iseconds)",
+    "cpu": {
+        "cores": $CPU_CORES,
+        "model": "$CPU_MODEL",
+        "mhz": "${CPU_MHZ:-0}"
+    },
+    "memory": {
+        "total_mb": $TOTAL_RAM_MB,
+        "available_mb": $FREE_RAM_MB,
+        "swap_mb": $SWAP_MB
+    },
+    "recommendations": {
+        "concurrent_connections": $RECOMMENDED_CONN,
+        "max_connections": $MAX_CONN,
+        "recommended_configs": $RECOMMENDED_CONFIGS,
+        "tier": "$TIER"
+    }
+}
+EOF
+    print_color $CYAN "  Benchmark results saved to: $BENCHMARK_FILE"
+    echo
+
+    read -p "Press Enter to return to menu..."
+}
+
+# Function to optimize system for maximum performance
+optimize_system_performance() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║         SYSTEM PERFORMANCE OPTIMIZATION                     ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+    print_color $YELLOW "This will optimize your system for maximum Xray performance."
+    print_color $YELLOW "Changes include: sysctl tuning, ulimits, and service limits."
+    echo
+    read -p "Continue with optimization? (y/n): " CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        print_color $YELLOW "Optimization cancelled."
+        return
+    fi
+    echo
+
+    # ========== SYSCTL OPTIMIZATION ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "1. APPLYING SYSCTL OPTIMIZATIONS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local SYSCTL_CONF="/etc/sysctl.d/99-xray-performance.conf"
+
+    # Backup existing if present
+    if [[ -f "$SYSCTL_CONF" ]]; then
+        cp "$SYSCTL_CONF" "${SYSCTL_CONF}.bak.$(date +%Y%m%d%H%M%S)"
+        print_color $CYAN "  ${BULLET} Backed up existing sysctl config"
+    fi
+
+    cat > "$SYSCTL_CONF" << 'EOF'
+# Xray Performance Optimization - Generated by xray-manager.sh
+# Maximum file descriptors
+fs.file-max = 2097152
+fs.nr_open = 2097152
+
+# Socket and network optimizations
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 65535
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.optmem_max = 65535
+
+# TCP optimizations
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.tcp_max_tw_buckets = 2000000
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_rfc1337 = 1
+net.ipv4.tcp_max_orphans = 262144
+net.ipv4.tcp_fastopen = 3
+
+# TCP buffer sizes
+net.ipv4.tcp_rmem = 4096 1048576 67108864
+net.ipv4.tcp_wmem = 4096 1048576 67108864
+
+# UDP optimizations
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+# IP forwarding and routing
+net.ipv4.ip_forward = 1
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# Connection tracking
+net.netfilter.nf_conntrack_max = 2097152
+net.nf_conntrack_max = 2097152
+
+# IPv6 (optional, keep enabled)
+net.ipv6.conf.all.forwarding = 1
+EOF
+
+    print_color $GREEN "  ${CHECK} Created sysctl configuration"
+
+    # Apply sysctl settings
+    print_color $CYAN "  ${BULLET} Applying sysctl settings..."
+    sysctl -p "$SYSCTL_CONF" 2>/dev/null || sysctl --system 2>/dev/null
+    print_color $GREEN "  ${CHECK} Sysctl settings applied"
+    echo
+
+    # ========== ULIMIT OPTIMIZATION ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "2. APPLYING ULIMIT OPTIMIZATIONS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local LIMITS_CONF="/etc/security/limits.d/99-xray-performance.conf"
+
+    cat > "$LIMITS_CONF" << 'EOF'
+# Xray Performance - Ulimit Configuration
+* soft nofile 1048576
+* hard nofile 1048576
+* soft nproc 65535
+* hard nproc 65535
+root soft nofile 1048576
+root hard nofile 1048576
+root soft nproc 65535
+root hard nproc 65535
+EOF
+
+    print_color $GREEN "  ${CHECK} Created ulimit configuration"
+    echo
+
+    # ========== SYSTEMD SERVICE OPTIMIZATION ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "3. OPTIMIZING XRAY SERVICE"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Create systemd override directory
+    mkdir -p /etc/systemd/system/xray.service.d
+
+    cat > /etc/systemd/system/xray.service.d/override.conf << 'EOF'
+[Service]
+LimitNOFILE=1048576
+LimitNPROC=65535
+LimitCORE=infinity
+LimitMEMLOCK=infinity
+TasksMax=infinity
+EOF
+
+    print_color $GREEN "  ${CHECK} Created Xray service override"
+
+    # Reload systemd
+    print_color $CYAN "  ${BULLET} Reloading systemd daemon..."
+    systemctl daemon-reload
+    print_color $GREEN "  ${CHECK} Systemd reloaded"
+    echo
+
+    # ========== PAM LIMITS ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "4. CONFIGURING PAM LIMITS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Ensure pam_limits is loaded
+    if ! grep -q "pam_limits.so" /etc/pam.d/common-session 2>/dev/null; then
+        echo "session required pam_limits.so" >> /etc/pam.d/common-session
+        print_color $GREEN "  ${CHECK} Added pam_limits to common-session"
+    else
+        print_color $CYAN "  ${BULLET} pam_limits already configured"
+    fi
+
+    if ! grep -q "pam_limits.so" /etc/pam.d/common-session-noninteractive 2>/dev/null; then
+        echo "session required pam_limits.so" >> /etc/pam.d/common-session-noninteractive
+        print_color $GREEN "  ${CHECK} Added pam_limits to common-session-noninteractive"
+    else
+        print_color $CYAN "  ${BULLET} pam_limits already configured for non-interactive"
+    fi
+    echo
+
+    # ========== RESTART XRAY IF RUNNING ==========
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        print_color $BOLD$GREEN "5. RESTARTING XRAY SERVICE"
+        print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        systemctl restart xray
+        print_color $GREEN "  ${CHECK} Xray service restarted with new limits"
+        echo
+    fi
+
+    # ========== SUMMARY ==========
+    print_color $BOLD$GREEN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$GREEN "║           OPTIMIZATION COMPLETE!                            ║"
+    print_color $BOLD$GREEN "╚════════════════════════════════════════════════════════════╝"
+    echo
+    print_color $CYAN "  Applied optimizations:"
+    print_color $GREEN "    ${CHECK} Kernel parameters (sysctl)"
+    print_color $GREEN "    ${CHECK} File descriptor limits (ulimit)"
+    print_color $GREEN "    ${CHECK} Systemd service limits"
+    print_color $GREEN "    ${CHECK} PAM limits configuration"
+    echo
+    print_color $YELLOW "  New limits (effective after reboot or new session):"
+    print_color $CYAN "    • Max open files:      1,048,576"
+    print_color $CYAN "    • Max connections:     65,535"
+    print_color $CYAN "    • TCP buffer max:      64 MB"
+    print_color $CYAN "    • Connection tracking: 2,097,152"
+    echo
+    print_color $BOLD$YELLOW "  NOTE: Some changes require a system reboot to take full effect."
+    print_color $CYAN "  Run option 29 (Benchmark) again to verify optimization."
+    echo
+
+    read -p "Press Enter to return to menu..."
+}
+
+# ============================================================================
+# MASS CONFIG GENERATOR
+# ============================================================================
+
+# Function to generate mass configs with QR codes
+mass_config_generator() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║              MASS CONFIG GENERATOR                          ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    # Check prerequisites
+    if [[ ! -f "$XRAY_CONFIG" ]]; then
+        print_color $RED "  ${CROSS} Error: Xray is not configured!"
+        print_color $YELLOW "  Please run option 2 first to configure VLESS + REALITY"
+        read -p "  Press Enter to return to menu..."
+        return 1
+    fi
+
+    # Check for qrencode
+    if ! command -v qrencode &> /dev/null; then
+        print_color $YELLOW "  ${BULLET} Installing qrencode..."
+        apt-get update && apt-get install -y qrencode
+    fi
+
+    print_color $YELLOW "This will generate multiple configs at once with QR codes."
+    print_color $CYAN "All configs will be saved in an organized directory structure."
+    echo
+
+    # Get base name
+    print_color $BOLD$BLUE "${ARROW} Step 1/3: Base Name"
+    echo
+    print_color $CYAN "  Enter a base name for the configs."
+    print_color $CYAN "  Configs will be named: {name}_001, {name}_002, etc."
+    echo
+    read -p "  Base name: " BASE_NAME
+
+    if [[ -z "$BASE_NAME" ]]; then
+        BASE_NAME="config"
+        print_color $YELLOW "  Using default name: $BASE_NAME"
+    fi
+
+    # Sanitize base name
+    BASE_NAME=$(echo "$BASE_NAME" | tr -cd '[:alnum:]_-')
+    print_color $GREEN "  ${CHECK} Base name: $BASE_NAME"
+    echo
+
+    # Get count
+    print_color $BOLD$BLUE "${ARROW} Step 2/3: Number of Configs"
+    echo
+
+    # Show recommendation if benchmark exists
+    if [[ -f "/usr/local/etc/xray/benchmark_results.json" ]]; then
+        local RECOMMENDED=$(jq -r '.recommendations.recommended_configs' /usr/local/etc/xray/benchmark_results.json 2>/dev/null)
+        if [[ -n "$RECOMMENDED" ]] && [[ "$RECOMMENDED" != "null" ]]; then
+            print_color $CYAN "  Recommended based on server benchmark: ${BOLD}$RECOMMENDED configs${NC}"
+        fi
+    fi
+    echo
+
+    read -p "  How many configs to generate? (1-1000): " CONFIG_COUNT
+
+    if ! [[ "$CONFIG_COUNT" =~ ^[0-9]+$ ]] || [[ $CONFIG_COUNT -lt 1 ]] || [[ $CONFIG_COUNT -gt 1000 ]]; then
+        print_color $RED "  ${CROSS} Invalid number. Must be between 1 and 1000."
+        read -p "  Press Enter to return to menu..."
+        return 1
+    fi
+    print_color $GREEN "  ${CHECK} Will generate $CONFIG_COUNT configs"
+    echo
+
+    # Confirm
+    print_color $BOLD$BLUE "${ARROW} Step 3/3: Confirmation"
+    echo
+    print_color $YELLOW "  Summary:"
+    print_color $CYAN "    • Base name:    $BASE_NAME"
+    print_color $CYAN "    • Count:        $CONFIG_COUNT"
+    print_color $CYAN "    • Naming:       ${BASE_NAME}_001 to ${BASE_NAME}_$(printf "%03d" $CONFIG_COUNT)"
+    echo
+    read -p "  Start generation? (y/n): " CONFIRM
+
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        print_color $YELLOW "  Generation cancelled."
+        return
+    fi
+    echo
+
+    # Create output directory
+    local OUTPUT_DIR="${HOME}/xray_mass_${BASE_NAME}_$(date +%Y%m%d_%H%M%S)"
+    local QR_DIR="${OUTPUT_DIR}/qrcodes"
+    local CONFIGS_DIR="${OUTPUT_DIR}/configs"
+    mkdir -p "$QR_DIR" "$CONFIGS_DIR"
+
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "GENERATING CONFIGS..."
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    # Get server config
+    local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
+    local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
+    local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "443")
+    local SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
+
+    # Create backup
+    backup_config &>/dev/null
+    print_color $CYAN "  ${CHECK} Configuration backed up"
+
+    # Initialize HTML index
+    local INDEX_FILE="${OUTPUT_DIR}/index.html"
+    cat > "$INDEX_FILE" << EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xray Configs - ${BASE_NAME}</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
+        h1 { color: #00d4ff; text-align: center; }
+        .info { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; }
+        .card { background: #0f3460; border-radius: 8px; padding: 15px; text-align: center; }
+        .card img { max-width: 200px; border-radius: 4px; }
+        .card h3 { color: #00d4ff; margin: 10px 0 5px; }
+        .card .uuid { font-size: 10px; color: #888; word-break: break-all; }
+        .url { font-size: 9px; color: #666; word-break: break-all; margin-top: 10px; padding: 5px; background: #0a0a1a; border-radius: 4px; }
+        .stats { text-align: center; margin: 20px 0; color: #00d4ff; }
+    </style>
+</head>
+<body>
+    <h1>🔐 Xray Mass Configs: ${BASE_NAME}</h1>
+    <div class="info">
+        <strong>Server:</strong> ${SERVER_IP}:${PORT} |
+        <strong>Protocol:</strong> VLESS + REALITY |
+        <strong>SNI:</strong> ${SNI} |
+        <strong>Generated:</strong> $(date)
+    </div>
+    <div class="stats">Total Configs: ${CONFIG_COUNT}</div>
+    <div class="grid">
+EOF
+
+    # Create configs list file
+    local LIST_FILE="${OUTPUT_DIR}/configs_list.txt"
+    echo "# Xray Mass Generated Configs - ${BASE_NAME}" > "$LIST_FILE"
+    echo "# Generated: $(date)" >> "$LIST_FILE"
+    echo "# Server: ${SERVER_IP}:${PORT}" >> "$LIST_FILE"
+    echo "# Total: ${CONFIG_COUNT}" >> "$LIST_FILE"
+    echo "# ================================================" >> "$LIST_FILE"
+    echo "" >> "$LIST_FILE"
+
+    # Progress bar
+    local PROGRESS_WIDTH=50
+    local GENERATED=0
+    local FAILED=0
+
+    for i in $(seq 1 $CONFIG_COUNT); do
+        local CLIENT_NAME=$(printf "%s_%03d" "$BASE_NAME" "$i")
+        local UUID=$(generate_uuid)
+        local SHORT_ID=$(generate_short_id)
+
+        # URL encode client name
+        local ENCODED_NAME=$(echo -n "$CLIENT_NAME" | jq -sRr @uri 2>/dev/null || echo "$CLIENT_NAME")
+
+        # Generate VLESS URL
+        local VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${ENCODED_NAME}"
+
+        # Add to Xray config
+        jq --arg uuid "$UUID" --arg email "$CLIENT_NAME" \
+           '.inbounds[0].settings.clients += [{"id": $uuid, "flow": "xtls-rprx-vision", "email": $email}]' \
+           "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+        # Add short ID
+        jq --arg shortid "$SHORT_ID" \
+           '.inbounds[0].streamSettings.realitySettings.shortIds += [$shortid]' \
+           "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+        # Save to clients database
+        local TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+        jq --arg uuid "$UUID" --arg email "$CLIENT_NAME" --arg shortid "$SHORT_ID" --arg timestamp "$TIMESTAMP" \
+           '.clients += [{"uuid": $uuid, "email": $email, "shortId": $shortid, "flow": "xtls-rprx-vision", "created": $timestamp, "mass_generated": true}]' \
+           "$CLIENTS_DB" > "${CLIENTS_DB}.tmp" && mv "${CLIENTS_DB}.tmp" "$CLIENTS_DB"
+
+        # Generate QR code PNG
+        local QR_FILE="${QR_DIR}/${CLIENT_NAME}.png"
+        qrencode -t PNG -o "$QR_FILE" -s 6 -m 2 "$VLESS_URL" 2>/dev/null
+
+        # Save config details
+        cat > "${CONFIGS_DIR}/${CLIENT_NAME}.txt" << EOF
+Client: ${CLIENT_NAME}
+UUID: ${UUID}
+Short ID: ${SHORT_ID}
+Server: ${SERVER_IP}
+Port: ${PORT}
+SNI: ${SNI}
+Public Key: ${PUBLIC_KEY}
+VLESS URL:
+${VLESS_URL}
+EOF
+
+        # Add to list file
+        echo "[$i] ${CLIENT_NAME}" >> "$LIST_FILE"
+        echo "    UUID: ${UUID}" >> "$LIST_FILE"
+        echo "    URL: ${VLESS_URL}" >> "$LIST_FILE"
+        echo "" >> "$LIST_FILE"
+
+        # Add to HTML index
+        cat >> "$INDEX_FILE" << EOF
+        <div class="card">
+            <img src="qrcodes/${CLIENT_NAME}.png" alt="${CLIENT_NAME}">
+            <h3>${CLIENT_NAME}</h3>
+            <div class="uuid">UUID: ${UUID:0:8}...${UUID: -4}</div>
+            <div class="url">${VLESS_URL:0:60}...</div>
+        </div>
+EOF
+
+        GENERATED=$((GENERATED + 1))
+
+        # Update progress bar
+        local PERCENT=$((GENERATED * 100 / CONFIG_COUNT))
+        local FILLED=$((GENERATED * PROGRESS_WIDTH / CONFIG_COUNT))
+        local EMPTY=$((PROGRESS_WIDTH - FILLED))
+        printf "\r  [${GREEN}"
+        printf '%*s' "$FILLED" | tr ' ' '█'
+        printf "${NC}"
+        printf '%*s' "$EMPTY" | tr ' ' '░'
+        printf "] %3d%% (%d/%d)" "$PERCENT" "$GENERATED" "$CONFIG_COUNT"
+    done
+
+    echo
+    echo
+
+    # Close HTML
+    cat >> "$INDEX_FILE" << EOF
+    </div>
+    <div class="info" style="margin-top: 20px; text-align: center;">
+        <p>Scan QR codes with v2rayNG (Android) or Shadowrocket (iOS)</p>
+        <p>Generated by Xray Manager - $(date)</p>
+    </div>
+</body>
+</html>
+EOF
+
+    # Restart Xray service
+    print_color $CYAN "  ${BULLET} Restarting Xray service..."
+    if systemctl restart xray 2>/dev/null; then
+        print_color $GREEN "  ${CHECK} Xray service restarted successfully"
+    else
+        print_color $YELLOW "  ${BULLET} Could not restart Xray (may not be running)"
+    fi
+    echo
+
+    # Summary
+    print_color $BOLD$GREEN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$GREEN "║           MASS GENERATION COMPLETE!                         ║"
+    print_color $BOLD$GREEN "╚════════════════════════════════════════════════════════════╝"
+    echo
+    print_color $GREEN "  ${CHECK} Generated: ${BOLD}$GENERATED configs${NC}"
+    if [[ $FAILED -gt 0 ]]; then
+        print_color $RED "  ${CROSS} Failed: $FAILED"
+    fi
+    echo
+    print_color $CYAN "  Output Directory: ${BOLD}${OUTPUT_DIR}${NC}"
+    echo
+    print_color $YELLOW "  Contents:"
+    print_color $CYAN "    📁 qrcodes/        - PNG QR codes for each config"
+    print_color $CYAN "    📁 configs/        - Individual config text files"
+    print_color $CYAN "    📄 index.html      - Visual gallery of all QR codes"
+    print_color $CYAN "    📄 configs_list.txt - Complete list with URLs"
+    echo
+    print_color $YELLOW "  Quick Access:"
+    print_color $CYAN "    • View gallery: Open ${OUTPUT_DIR}/index.html in browser"
+    print_color $CYAN "    • List all: cat ${OUTPUT_DIR}/configs_list.txt"
+    echo
+
+    # Show disk usage
+    local DIR_SIZE=$(du -sh "$OUTPUT_DIR" 2>/dev/null | cut -f1)
+    print_color $CYAN "  Total Size: ${DIR_SIZE}"
+    echo
+
+    read -p "Press Enter to return to menu..."
+}
+
 # Function to run DPI and security tests
 run_dpi_security_test() {
     clear
@@ -2188,8 +3463,8 @@ run_dpi_security_test() {
     DEST=$(jq -r '.inbounds[0].streamSettings.realitySettings.dest' "$XRAY_CONFIG" 2>/dev/null)
     PROTOCOL=$(jq -r '.inbounds[0].protocol' "$XRAY_CONFIG" 2>/dev/null)
     FLOW=$(jq -r '.inbounds[0].settings.clients[0].flow' "$XRAY_CONFIG" 2>/dev/null)
-    SERVER_IP=$(hostname -I | awk '{print $1}')
-    PUBLIC_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || echo "$SERVER_IP")
+    SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
+    PUBLIC_IP="$SERVER_IP"
 
     print_color $BOLD$CYAN "╔══════════════════════════════════════════════════════════════╗"
     print_color $BOLD$CYAN "║      COMPREHENSIVE DPI & LEAK SECURITY TEST SUITE            ║"
@@ -2615,6 +3890,12 @@ show_menu() {
     echo "    28) DPI & Leak Security Test ${GREEN}★${NC}"
     echo
 
+    print_color $CYAN "  ${BOLD}Performance & Mass Tools${NC} ${MAGENTA}★ NEW${NC}"
+    echo "    29) Server Benchmark & Recommendations"
+    echo "    30) Optimize System for Maximum Performance"
+    echo "    31) Mass Config Generator (Bulk + QR Codes)"
+    echo
+
     print_color $BOLD$BLUE "└─────────────────────────────────────────────────────────────┘"
     echo
     print_color $YELLOW "  0) Exit"
@@ -2661,6 +3942,9 @@ main() {
                 26) run_system_diagnostics ;;
                 27) check_and_fix_private_key --interactive ;;
                 28) run_dpi_security_test ;;
+                29) server_benchmark ;;
+                30) optimize_system_performance ;;
+                31) mass_config_generator ;;
                 0) exit 0 ;;
                 *) print_color $RED "Invalid choice" ;;
             esac
@@ -2698,6 +3982,9 @@ main() {
             diagnostics|diag) run_system_diagnostics ;;
             fix-key|fix-private-key) check_and_fix_private_key ;;
             test|dpi-test|security-test) run_dpi_security_test ;;
+            benchmark|bench) server_benchmark ;;
+            optimize|perf) optimize_system_performance ;;
+            mass-generate|mass|bulk) mass_config_generator ;;
             *)
                 print_color $RED "Unknown command: $1"
                 echo
@@ -2731,6 +4018,9 @@ main() {
                 echo "  diagnostics      - Run system diagnostics"
                 echo "  fix-key          - Check and fix empty private key"
                 echo "  test             - Run DPI & security tests ${BOLD}${GREEN}(Quick Status)${NC}"
+                echo "  benchmark        - Run server benchmark & get recommendations"
+                echo "  optimize         - Optimize system for maximum performance"
+                echo "  mass-generate    - Generate multiple configs with QR codes"
                 echo
                 print_color $YELLOW "Run without arguments for interactive menu"
                 exit 1

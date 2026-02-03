@@ -54,6 +54,12 @@ The script is designed to be:
 ### Key Features
 
 - One-command **install** and **configure** flow for VLESS + REALITY.
+- **Smart port selection**: Automatically scans system and suggests available high ports (443, 8443, 2053, 2083, 2087, 2096, 51820, 41234, 32145).
+- **Port validation**: Checks if chosen port is already in use and warns before proceeding.
+- **Auto-apply firewall rules**: Automatically configures UFW, iptables, or firewalld rules when available.
+- **IPv4 prioritization**: Forces IPv4 connections to prevent IPv6-only issues; handles dual-stack servers correctly.
+- **IP forwarding auto-enable**: Automatically enables kernel IP forwarding required for proxy traffic routing.
+- **Comprehensive firewall guide**: Displays step-by-step instructions for 7 major VPS providers (Hetzner, DigitalOcean, Vultr, AWS, Oracle, GCP, Linode).
 - Intuitive **TUI menu** with numbered actions.
 - **Client management** (add/list/remove) with automatic UUID & short ID generation.
 - **Connection export**:
@@ -70,6 +76,7 @@ The script is designed to be:
   - system and configuration diagnostics
   - REALITY private key self-healing
   - legacy VPN cleanup helper
+  - DPI/security evasion tests
 - Built-in **connection guides** for major platforms (Android, iOS, Windows, macOS, Linux).
 
 ---
@@ -114,20 +121,30 @@ Internally, `xray-manager.sh` is organized into logical function groups. Names m
    - Install required packages
    - Download and install Xray Core via the official script
    - Create and enable the `xray.service` unit
+   - Enable kernel IP forwarding for proper traffic routing
 
 3. **Configuration & REALITY**
+   - Smart port selection with system scanning
+   - Port validation and conflict detection
    - Interactive configuration wizard
    - REALITY x25519 key generation
    - Initial client UUID + short ID
    - Writing `config.json`, `clients.json`, and helper text files
+   - Automatic local firewall rule application (UFW, iptables, firewalld)
 
-4. **Client management**
+4. **Firewall & Network**
+   - System port scanner and availability checker
+   - Automatic local firewall configuration (UFW, iptables, firewalld)
+   - Comprehensive VPS provider firewall instructions (7 providers)
+   - IPv4-only connectivity verification
+
+5. **Client management**
    - Add/remove/list clients
    - Keep `config.json` and `clients.json` in sync
-   - Generate VLESS+REALITY URLs
+   - Generate VLESS+REALITY URLs (with forced IPv4)
    - Generate ASCII and (optionally) PNG QR codes
 
-5. **Service control**
+6. **Service control**
    - Start/stop/restart Xray
    - Enable/disable on boot
    - Basic status checks (is the binary installed, is the port open, etc.)
@@ -136,10 +153,11 @@ Internally, `xray-manager.sh` is organized into logical function groups. Names m
    - Colorful status dashboard (ports, processes, resource usage)
    - View/tail/vacuum logs
    - Export logs for support/debugging
-   - Very basic per-client stats from the access log
+   - Basic per-client stats from the access log
 
 7. **Diagnostics & maintenance**
-   - System diagnostics (“health check”)
+   - System diagnostics ("health check")
+   - DPI/security evasion tests
    - REALITY key sanity checks and repair
    - Backups and restore of configuration
    - Optional cleanup of legacy VPN tools
@@ -202,20 +220,32 @@ For a clean VPS:
 
 3. **Run the configuration wizard.**  
    The VLESS+REALITY wizard will:
-   - Ask for the listening **port** (default: 443).
+   - **Smart port selection**: Scans your system for available ports and suggests the best option (443, 8443, 2053, 51820, etc.)
+   - Validates your port choice and warns if it's already in use
    - Ask which **destination/SNI** to impersonate (Google, Cloudflare, or custom).
    - Ask for a **server name** (often same as SNI or a domain you control).
-   - Generate the **REALITY key pair** and the first client’s **UUID** and **short ID**.
+   - Generate the **REALITY key pair** and the first client's **UUID** and **short ID**.
    - Write `config.json`, `clients.json`, and helper text files.
    - Create or update `/etc/systemd/system/xray.service`.
+   - **Auto-apply local firewall rules** (ufw, iptables, or firewalld)
+   - Display comprehensive firewall instructions for major VPS providers
 
 4. **Enable and start the service.**  
    With menu options for:
    - Enable on boot.
    - Start now.
 
-5. **Open firewall / provider rules.**  
-   Manually allow inbound access to the configured port (e.g., via your VPS dashboard).
+5. **Configure VPS provider firewall.**  
+   The script provides detailed, step-by-step instructions for:
+   - Hetzner Cloud
+   - DigitalOcean
+   - Vultr
+   - AWS EC2
+   - Oracle Cloud (OCI)
+   - Google Cloud (GCP)
+   - Linode/Akamai
+   
+   Plus verification commands to confirm your port is accessible.
 
 After this, the server is ready; you only need to create clients and export their connection info.
 
@@ -509,14 +539,26 @@ The `xray-manager.sh` script itself is left in place; delete it manually if desi
 
 - **Client cannot connect**
   - Ensure your VPS and local firewalls allow the chosen port.
+  - **Firewall is the most common culprit!** Make sure to:
+    - Configure your VPS provider firewall (Hetzner, DigitalOcean, etc.)
+    - Run the local firewall configuration (auto-applied by the script)
+    - Verify with: `ss -tlnp | grep xray`
   - Confirm the client is using the **correct**:
-    - IP or domain
+    - **IPv4 address** (not IPv6 - the script forces IPv4)
     - Port
     - UUID
     - REALITY public key
     - SNI / server name
     - Short ID
   - Run the built-in diagnostics for more hints.
+
+- **"io: read/write on closed pipe" error on client**
+  - This usually means the connection couldn't be established.
+  - Likely causes:
+    - VPS provider firewall not allowing the port (most common)
+    - IPv6 address being used instead of IPv4
+    - Port not actually listening (check: `ss -tlnp | grep 32145`)
+  - Solution: Verify firewall rules and use IPv4 in client config.
 
 - **Slow or unstable performance**
   - Check CPU and memory usage.
