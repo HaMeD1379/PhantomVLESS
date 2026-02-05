@@ -184,44 +184,551 @@ show_status_dashboard() {
     echo
 }
 
-# Function to install Xray
-install_xray() {
-    print_color $BLUE "Installing Xray Core..."
+# Directory for version management
+XRAY_VERSIONS_DIR="/usr/local/etc/xray/versions"
 
+# Function to get installed version
+get_installed_version() {
     if [[ -f "$XRAY_BIN" ]]; then
-        print_color $YELLOW "Xray is already installed"
-        read -p "Reinstall? (y/n): " choice
-        [[ "$choice" != "y" ]] && return
+        "$XRAY_BIN" version 2>/dev/null | head -n1 | awk '{print $2}'
+    else
+        echo "not-installed"
+    fi
+}
+
+# Function to validate version format
+validate_version_format() {
+    local VERSION=$1
+    # Accept versions like: 25.10.15, 26, 1.8.13, etc.
+    if [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Function to fetch available versions (with caching)
+fetch_available_versions() {
+    local CACHE_FILE="/tmp/xray_versions_cache.txt"
+    local CACHE_TTL=3600  # 1 hour cache TTL
+
+    # Check if cache exists and is fresh
+    if [[ -f "$CACHE_FILE" ]]; then
+        local CACHE_AGE=$(($(date +%s) - $(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)))
+        if [[ $CACHE_AGE -lt $CACHE_TTL ]]; then
+            cat "$CACHE_FILE"
+            return 0
+        fi
+    fi
+
+    # Fetch from GitHub API (fetch top 20 releases)
+    local VERSIONS=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases?per_page=20 2>/dev/null | grep '"tag_name"' | grep -oP '(?<="tag_name": ")v[^"]+' | sed 's/^v//' | sort -V -r)
+
+    if [[ -z "$VERSIONS" ]]; then
+        # Fallback to some common recent versions if API fails
+        VERSIONS="26
+25.12.1
+25.11.2
+25.10.15
+25.1.0
+24.12.1"
+    fi
+
+    echo "$VERSIONS" | tee "$CACHE_FILE"
+}
+
+# Function to backup current binary before version change
+backup_current_version() {
+    if [[ -f "$XRAY_BIN" ]]; then
+        mkdir -p "$XRAY_VERSIONS_DIR"
+        local CURRENT_VERSION=$(get_installed_version)
+        local BACKUP_DIR="${XRAY_VERSIONS_DIR}/xray-${CURRENT_VERSION}-$(date +%Y%m%d_%H%M%S)"
+        mkdir -p "$BACKUP_DIR"
+
+        # Backup the binary
+        cp "$XRAY_BIN" "${BACKUP_DIR}/xray"
+
+        # Save version info
+        echo "$CURRENT_VERSION" > "${BACKUP_DIR}/version.txt"
+        echo "$(date)" > "${BACKUP_DIR}/backup_time.txt"
+
+        echo "$BACKUP_DIR"
+    fi
+}
+
+# Function to rollback to previous version
+rollback_xray_version() {
+    if [[ ! -d "$XRAY_VERSIONS_DIR" ]]; then
+        print_color $RED "No previous versions found to rollback"
+        return 1
+    fi
+
+    # Get list of backups sorted by timestamp
+    local BACKUPS=($(find "$XRAY_VERSIONS_DIR" -maxdepth 1 -type d -name 'xray-*' | sort -r))
+
+    if [[ ${#BACKUPS[@]} -eq 0 ]]; then
+        print_color $RED "No backup versions available"
+        return 1
+    fi
+
+    # Show available backups
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║                  AVAILABLE BACKUP VERSIONS                 ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    local CURRENT_VERSION=$(get_installed_version)
+    for i in "${!BACKUPS[@]}"; do
+        local BACKUP_DIR="${BACKUPS[$i]}"
+        local VERSION=$(cat "${BACKUP_DIR}/version.txt" 2>/dev/null || echo "unknown")
+        local BACKUP_TIME=$(cat "${BACKUP_DIR}/backup_time.txt" 2>/dev/null || echo "unknown")
+        printf "  %d) Version %-12s (Backed up: %s)\n" "$((i + 1))" "$VERSION" "$BACKUP_TIME"
+    done
+    echo
+
+    read -p "Select backup to restore (number): " BACKUP_CHOICE
+
+    if ! [[ "$BACKUP_CHOICE" =~ ^[0-9]+$ ]] || [[ $BACKUP_CHOICE -lt 1 ]] || [[ $BACKUP_CHOICE -gt ${#BACKUPS[@]} ]]; then
+        print_color $RED "Invalid selection"
+        return 1
+    fi
+
+    local SELECTED_BACKUP="${BACKUPS[$((BACKUP_CHOICE - 1))]}"
+    local SELECTED_VERSION=$(cat "${SELECTED_BACKUP}/version.txt" 2>/dev/null || echo "unknown")
+
+    print_color $YELLOW "Rolling back to version $SELECTED_VERSION..."
+
+    # Restore binary
+    cp "${SELECTED_BACKUP}/xray" "$XRAY_BIN"
+    chmod +x "$XRAY_BIN"
+
+    # Verify
+    local NEW_VERSION=$(get_installed_version)
+    if [[ "$NEW_VERSION" == "$SELECTED_VERSION" ]]; then
+        print_color $GREEN "${CHECK} Successfully rolled back to version $NEW_VERSION"
+
+        # Restart service if running
+        if systemctl is-active --quiet xray; then
+            print_color $CYAN "Restarting Xray service..."
+            systemctl restart xray
+            sleep 2
+            if systemctl is-active --quiet xray; then
+                print_color $GREEN "${CHECK} Service restarted successfully"
+            fi
+        fi
+        return 0
+    else
+        print_color $RED "Rollback failed - version mismatch"
+        return 1
+    fi
+}
+
+# Function to install a specific version interactively
+install_specific_version() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║            INSTALL SPECIFIC XRAY VERSION                   ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    local CURRENT_VERSION=$(get_installed_version)
+    if [[ "$CURRENT_VERSION" != "not-installed" ]]; then
+        print_color $GREEN "  Current installed version: ${BOLD}$CURRENT_VERSION${NC}"
+    else
+        print_color $YELLOW "  Xray is not currently installed"
+    fi
+    echo
+
+    print_color $CYAN "Fetching available versions from GitHub..."
+    echo
+
+    local VERSIONS=$(fetch_available_versions)
+
+    if [[ -z "$VERSIONS" ]]; then
+        print_color $RED "  ${CROSS} Failed to fetch versions from GitHub"
+        read -p "  Press Enter to return..."
+        return 1
+    fi
+
+    # Convert to array
+    local VERSION_ARRAY=()
+    while IFS= read -r version; do
+        [[ -n "$version" ]] && VERSION_ARRAY+=("$version")
+    done <<< "$VERSIONS"
+
+    print_color $BOLD$BLUE "Available Versions (${#VERSION_ARRAY[@]} shown):"
+    echo
+
+    for i in "${!VERSION_ARRAY[@]}"; do
+        local ver="${VERSION_ARRAY[$i]}"
+        local MARKER=""
+        if [[ "$ver" == "$CURRENT_VERSION" ]]; then
+            MARKER="${GREEN} ← Currently Installed${NC}"
+        fi
+        printf "  %2d) %-15s %b\n" "$((i + 1))" "$ver" "$MARKER"
+    done
+    echo
+
+    print_color $YELLOW "  0) Cancel and return to menu"
+    echo
+    print_color $CYAN "  Or type a version number manually (e.g., 25.10.15)"
+    echo
+
+    read -p "  Select version (number or version string): " VERSION_CHOICE
+
+    if [[ "$VERSION_CHOICE" == "0" ]] || [[ -z "$VERSION_CHOICE" ]]; then
+        return 0
+    fi
+
+    local SELECTED_VERSION=""
+
+    # Check if it's a menu number or a version string
+    if [[ "$VERSION_CHOICE" =~ ^[0-9]+$ ]] && [[ "$VERSION_CHOICE" -ge 1 ]] && [[ "$VERSION_CHOICE" -le ${#VERSION_ARRAY[@]} ]]; then
+        SELECTED_VERSION="${VERSION_ARRAY[$((VERSION_CHOICE - 1))]}"
+    elif validate_version_format "$VERSION_CHOICE"; then
+        SELECTED_VERSION="$VERSION_CHOICE"
+    else
+        print_color $RED "  ${CROSS} Invalid selection"
+        read -p "  Press Enter to return..."
+        return 1
+    fi
+
+    if [[ "$SELECTED_VERSION" == "$CURRENT_VERSION" ]]; then
+        print_color $YELLOW "  Version $SELECTED_VERSION is already installed"
+        read -p "  Reinstall anyway? (y/n): " REINSTALL
+        [[ "$REINSTALL" != "y" ]] && return 0
+    fi
+
+    echo
+    print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "  Version Switch Information"
+    print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+    print_color $GREEN "  ${CHECK} Your existing clients will continue to work"
+    print_color $GREEN "  ${CHECK} Configuration files will be preserved"
+    print_color $GREEN "  ${CHECK} Server keys (public/private) remain unchanged"
+    print_color $GREEN "  ${CHECK} QR codes and VLESS URLs stay valid"
+    print_color $GREEN "  ${CHECK} No changes needed on client devices"
+    echo
+    if [[ "$CURRENT_VERSION" != "not-installed" ]]; then
+        print_color $YELLOW "  ${BULLET} Current version ($CURRENT_VERSION) will be backed up"
+        print_color $YELLOW "  ${BULLET} You can rollback anytime if needed"
+    fi
+    echo
+
+    read -p "  Install version $SELECTED_VERSION? (y/n): " CONFIRM
+    [[ "$CONFIRM" != "y" ]] && return 0
+
+    echo
+    install_xray "$SELECTED_VERSION"
+
+    echo
+    print_color $BOLD$GREEN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Check if service needs restart
+    if systemctl is-active --quiet xray; then
+        print_color $CYAN "  Xray service is running. Restarting with new version..."
+        systemctl restart xray
+        sleep 2
+        if systemctl is-active --quiet xray; then
+            print_color $GREEN "  ${CHECK} Service restarted successfully with version $(get_installed_version)"
+        else
+            print_color $RED "  ${CROSS} Service failed to start! Rolling back..."
+            rollback_xray_version
+        fi
+    fi
+    echo
+
+    read -p "  Press Enter to continue..."
+}
+
+# Function to list available versions
+list_available_versions() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║              AVAILABLE XRAY VERSIONS                       ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    local CURRENT_VERSION=$(get_installed_version)
+    print_color $GREEN "  Currently installed: ${BOLD}$CURRENT_VERSION${NC}"
+    echo
+
+    print_color $CYAN "  Fetching latest releases from GitHub..."
+    echo
+
+    local VERSIONS=$(fetch_available_versions)
+
+    print_color $BOLD$BLUE "  Available Versions:"
+    echo
+
+    while IFS= read -r ver; do
+        if [[ -n "$ver" ]]; then
+            if [[ "$ver" == "$CURRENT_VERSION" ]]; then
+                print_color $GREEN "    • $ver  ← Currently Installed"
+            else
+                echo "    • $ver"
+            fi
+        fi
+    done <<< "$VERSIONS"
+    echo
+
+    read -p "  Press Enter to continue..."
+}
+
+# Function to clean old version backups
+clean_version_backups() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║              CLEAN OLD VERSION BACKUPS                     ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    if [[ ! -d "$XRAY_VERSIONS_DIR" ]]; then
+        print_color $YELLOW "  No backup directory found"
+        read -p "  Press Enter to return..."
+        return
+    fi
+
+    local BACKUPS=($(find "$XRAY_VERSIONS_DIR" -maxdepth 1 -type d -name 'xray-*' | sort -r))
+
+    if [[ ${#BACKUPS[@]} -eq 0 ]]; then
+        print_color $YELLOW "  No backups found"
+        read -p "  Press Enter to return..."
+        return
+    fi
+
+    print_color $BLUE "  Found ${#BACKUPS[@]} backup(s):"
+    echo
+
+    local TOTAL_SIZE=0
+    for BACKUP_DIR in "${BACKUPS[@]}"; do
+        local VERSION=$(cat "${BACKUP_DIR}/version.txt" 2>/dev/null || echo "unknown")
+        local BACKUP_TIME=$(cat "${BACKUP_DIR}/backup_time.txt" 2>/dev/null || echo "unknown")
+        local SIZE=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
+        printf "    • Version %-12s (%s) - %s\n" "$VERSION" "$BACKUP_TIME" "$SIZE"
+    done
+    echo
+
+    print_color $YELLOW "  Options:"
+    echo "    1) Keep only the 3 most recent backups"
+    echo "    2) Delete all backups"
+    echo "    3) Cancel"
+    echo
+
+    read -p "  Choice: " CLEAN_CHOICE
+
+    case $CLEAN_CHOICE in
+        1)
+            if [[ ${#BACKUPS[@]} -le 3 ]]; then
+                print_color $GREEN "  ${CHECK} Already have 3 or fewer backups"
+            else
+                local TO_DELETE=("${BACKUPS[@]:3}")
+                for BACKUP_DIR in "${TO_DELETE[@]}"; do
+                    rm -rf "$BACKUP_DIR"
+                    print_color $YELLOW "  Deleted: $(basename "$BACKUP_DIR")"
+                done
+                print_color $GREEN "  ${CHECK} Cleaned up $((${#BACKUPS[@]} - 3)) old backup(s)"
+            fi
+            ;;
+        2)
+            read -p "  Are you sure you want to delete ALL backups? (type 'yes'): " CONFIRM_DELETE
+            if [[ "$CONFIRM_DELETE" == "yes" ]]; then
+                rm -rf "${XRAY_VERSIONS_DIR:?}"/xray-*
+                print_color $GREEN "  ${CHECK} All backups deleted"
+            else
+                print_color $YELLOW "  Cancelled"
+            fi
+            ;;
+        *)
+            print_color $YELLOW "  Cancelled"
+            ;;
+    esac
+    echo
+
+    read -p "  Press Enter to continue..."
+}
+
+# Version management menu
+version_management_menu() {
+    while true; do
+        clear
+        print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+        print_color $BOLD$CYAN "║              XRAY VERSION MANAGEMENT                       ║"
+        print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+        echo
+
+        local CURRENT_VERSION=$(get_installed_version)
+        if [[ "$CURRENT_VERSION" != "not-installed" ]]; then
+            print_color $GREEN "  Current Version: ${BOLD}$CURRENT_VERSION${NC}"
+        else
+            print_color $YELLOW "  Xray is not installed"
+        fi
+
+        # Count backups
+        local BACKUP_COUNT=0
+        if [[ -d "$XRAY_VERSIONS_DIR" ]]; then
+            BACKUP_COUNT=$(find "$XRAY_VERSIONS_DIR" -maxdepth 1 -type d -name 'xray-*' 2>/dev/null | wc -l)
+        fi
+        print_color $CYAN "  Available Backups: ${BACKUP_COUNT}"
+        echo
+
+        print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo
+        print_color $BOLD$BLUE "  Version Operations:"
+        echo "    1) Install/Switch to Specific Version"
+        echo "    2) Install Latest Version"
+        echo "    3) List Available Versions"
+        echo
+        print_color $BOLD$BLUE "  Backup & Rollback:"
+        echo "    4) Rollback to Previous Version"
+        echo "    5) Clean Old Backups"
+        echo
+        print_color $YELLOW "    0) Back to Main Menu"
+        echo
+
+        print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo
+        print_color $GREEN "  ${CHECK} Switching versions preserves all clients & configs"
+        print_color $GREEN "  ${CHECK} No changes needed on client devices"
+        echo
+
+        read -p "  Enter choice: " VERSION_MENU_CHOICE
+
+        case $VERSION_MENU_CHOICE in
+            1) install_specific_version ;;
+            2) install_xray ;;
+            3) list_available_versions ;;
+            4) rollback_xray_version ;;
+            5) clean_version_backups ;;
+            0) return ;;
+            *) print_color $RED "  Invalid choice" ; sleep 1 ;;
+        esac
+    done
+}
+
+# Function to install Xray with optional version specification
+install_xray() {
+    local REQUESTED_VERSION=$1
+    local INTERACTIVE=${2:-true}
+
+    if [[ "$INTERACTIVE" == "true" ]]; then
+        print_color $BLUE "Installing Xray Core..."
+    fi
+
+    local CURRENT_VERSION=$(get_installed_version)
+
+    if [[ -f "$XRAY_BIN" && "$CURRENT_VERSION" != "not-installed" ]]; then
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $YELLOW "Xray is already installed (version: $CURRENT_VERSION)"
+
+            if [[ -n "$REQUESTED_VERSION" ]]; then
+                read -p "Switch to version $REQUESTED_VERSION? (y/n): " choice
+            else
+                read -p "Reinstall or update? (y/n): " choice
+            fi
+            [[ "$choice" != "y" ]] && return
+        fi
+    fi
+
+    # If version is not specified, use latest (empty string tells the installer script to use latest)
+    if [[ -z "$REQUESTED_VERSION" ]]; then
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $CYAN "Installing latest version of Xray..."
+        fi
+    else
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $CYAN "Installing Xray version $REQUESTED_VERSION..."
+        fi
     fi
 
     # Install dependencies
-    apt-get update
-    apt-get install -y curl wget unzip jq qrencode net-tools bc iperf3
+    if [[ "$INTERACTIVE" == "true" ]]; then
+        apt-get update >/dev/null 2>&1
+        apt-get install -y curl wget unzip jq qrencode net-tools bc iperf3 2>/dev/null
+    else
+        apt-get update >/dev/null 2>&1
+        apt-get install -y curl wget unzip jq qrencode net-tools bc iperf3 >/dev/null 2>&1
+    fi
 
-    # Download and install Xray
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    # Backup current version before installing new one
+    if [[ "$CURRENT_VERSION" != "not-installed" ]]; then
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $CYAN "Backing up current version..."
+        fi
+        backup_current_version >/dev/null
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $GREEN "${CHECK} Backup complete"
+        fi
+    fi
 
     # Create directories
     mkdir -p /var/log/xray
     mkdir -p /usr/local/etc/xray
     mkdir -p "$CONFIG_BACKUP_DIR"
+    mkdir -p "$XRAY_VERSIONS_DIR"
 
-    # Initialize clients database
-    echo '{"clients": []}' > "$CLIENTS_DB"
+    # Backup current config if it exists
+    if [[ -f "$XRAY_CONFIG" ]]; then
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $CYAN "Preserving existing configuration..."
+        fi
+        cp "$XRAY_CONFIG" "${XRAY_CONFIG}.pre-install-backup"
+    fi
+
+    # Download and install Xray
+    if [[ -n "$REQUESTED_VERSION" ]]; then
+        # Install specific version
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version "$REQUESTED_VERSION" >/dev/null 2>&1 || \
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
+    else
+        # Install latest version
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
+    fi
+
+    # Restore configuration if it was backed up
+    if [[ -f "${XRAY_CONFIG}.pre-install-backup" ]]; then
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $CYAN "Restoring configuration..."
+        fi
+        cp "${XRAY_CONFIG}.pre-install-backup" "$XRAY_CONFIG"
+        rm "${XRAY_CONFIG}.pre-install-backup"
+    else
+        # Initialize clients database if it doesn't exist
+        if [[ ! -f "$CLIENTS_DB" ]]; then
+            echo '{"clients": []}' > "$CLIENTS_DB"
+        fi
+    fi
 
     # Verify installation
     if [[ -x "$XRAY_BIN" ]]; then
-        local VERSION=$("$XRAY_BIN" version 2>/dev/null | head -n1 | awk '{print $2}')
-        print_color $GREEN "Xray installed successfully (version: $VERSION)"
+        local INSTALLED_VERSION=$(get_installed_version)
+
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $GREEN "Xray installed successfully (version: $INSTALLED_VERSION)"
+        fi
+
+        # Verify the version matches requested (if version was specified)
+        if [[ -n "$REQUESTED_VERSION" && "$INSTALLED_VERSION" != "$REQUESTED_VERSION" ]]; then
+            print_color $YELLOW "⚠ Note: Requested version $REQUESTED_VERSION, but installed version is $INSTALLED_VERSION"
+            print_color $YELLOW "  (The installer script may have installed a different version)"
+        fi
 
         # Test key generation
         if "$XRAY_BIN" x25519 &>/dev/null; then
-            print_color $GREEN "${CHECK} Key generation: Working"
+            if [[ "$INTERACTIVE" == "true" ]]; then
+                print_color $GREEN "${CHECK} Key generation: Working"
+            fi
         else
-            print_color $YELLOW "${CROSS} Key generation may have issues, but fallback will be used"
+            if [[ "$INTERACTIVE" == "true" ]]; then
+                print_color $YELLOW "${CROSS} Key generation may have issues, but fallback will be used"
+            fi
         fi
     else
-        print_color $RED "Xray installation may have failed. Please check manually."
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $RED "Xray installation may have failed. Please check manually."
+        fi
+        return 1
     fi
 }
 
@@ -1483,6 +1990,388 @@ remove_client() {
         systemctl restart xray
         print_color $GREEN "Xray service restarted"
     fi
+}
+
+# Function to mass remove clients
+mass_remove_clients() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║               MASS CLIENT REMOVER                          ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    # Check if clients database exists
+    if [[ ! -f "$CLIENTS_DB" ]]; then
+        print_color $RED "  ${CROSS} No clients database found"
+        read -p "  Press Enter to return..."
+        return 1
+    fi
+
+    # Get total clients
+    local TOTAL_CLIENTS=$(jq -r '.clients | length' "$CLIENTS_DB" 2>/dev/null || echo "0")
+
+    if [[ "$TOTAL_CLIENTS" -eq 0 ]]; then
+        print_color $YELLOW "  No clients to remove"
+        read -p "  Press Enter to return..."
+        return
+    fi
+
+    print_color $GREEN "  Total clients: ${BOLD}$TOTAL_CLIENTS${NC}"
+    echo
+
+    # Show removal options
+    print_color $BOLD$BLUE "Select removal method:"
+    echo
+    echo "    1) Remove by pattern (matching email prefix)"
+    echo "    2) Remove all mass-generated clients"
+    echo "    3) Remove by range (e.g., PREFIX_001 to PREFIX_050)"
+    echo -e "    4) Remove ALL clients ${RED}(DANGEROUS!)${NC}"
+    echo "    5) Interactive selection (pick clients to remove)"
+    echo
+    echo "    0) Cancel and return"
+    echo
+
+    read -p "  Select option: " REMOVE_OPTION
+
+    case $REMOVE_OPTION in
+        1)
+            # Remove by pattern
+            echo
+            print_color $CYAN "  Enter email pattern/prefix to match:"
+            print_color $YELLOW "  Example: 'MIGA_' will match MIGA_001, MIGA_002, etc."
+            echo
+            read -p "  Pattern: " PATTERN
+
+            if [[ -z "$PATTERN" ]]; then
+                print_color $RED "  ${CROSS} No pattern provided"
+                read -p "  Press Enter to return..."
+                return
+            fi
+
+            # Count matching clients
+            local MATCH_COUNT=$(jq -r --arg pattern "$PATTERN" '[.clients[] | select(.email | startswith($pattern))] | length' "$CLIENTS_DB" 2>/dev/null || echo "0")
+
+            if [[ "$MATCH_COUNT" -eq 0 ]]; then
+                print_color $YELLOW "  No clients found matching pattern '$PATTERN'"
+                read -p "  Press Enter to return..."
+                return
+            fi
+
+            print_color $YELLOW "  Found ${BOLD}$MATCH_COUNT${NC}${YELLOW} clients matching '$PATTERN'"
+            echo
+
+            # List matching clients (first 10)
+            print_color $CYAN "  Matching clients (showing first 10):"
+            jq -r --arg pattern "$PATTERN" '.clients[] | select(.email | startswith($pattern)) | "    • \(.email)"' "$CLIENTS_DB" 2>/dev/null | head -10
+            if [[ $MATCH_COUNT -gt 10 ]]; then
+                echo "    ... and $((MATCH_COUNT - 10)) more"
+            fi
+            echo
+
+            read -p "  Remove all $MATCH_COUNT matching clients? (yes/no): " CONFIRM
+            [[ "$CONFIRM" != "yes" ]] && return
+
+            # Get matching UUIDs for config removal
+            local MATCHING_UUIDS=$(jq -r --arg pattern "$PATTERN" '.clients[] | select(.email | startswith($pattern)) | .uuid' "$CLIENTS_DB" 2>/dev/null)
+            local MATCHING_SHORTIDS=$(jq -r --arg pattern "$PATTERN" '.clients[] | select(.email | startswith($pattern)) | .shortId' "$CLIENTS_DB" 2>/dev/null)
+
+            # Remove from config
+            while IFS= read -r uuid; do
+                [[ -z "$uuid" ]] && continue
+                jq --arg id "$uuid" \
+                   'del(.inbounds[0].settings.clients[] | select(.id == $id))' \
+                   "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+            done <<< "$MATCHING_UUIDS"
+
+            # Remove short IDs from config
+            while IFS= read -r shortid; do
+                [[ -z "$shortid" ]] && continue
+                jq --arg sid "$shortid" \
+                   '.inbounds[0].streamSettings.realitySettings.shortIds -= [$sid]' \
+                   "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+            done <<< "$MATCHING_SHORTIDS"
+
+            # Remove from database
+            jq --arg pattern "$PATTERN" \
+               'del(.clients[] | select(.email | startswith($pattern)))' \
+               "$CLIENTS_DB" > "${CLIENTS_DB}.tmp" && mv "${CLIENTS_DB}.tmp" "$CLIENTS_DB"
+
+            print_color $GREEN "  ${CHECK} Removed $MATCH_COUNT clients matching '$PATTERN'"
+            ;;
+
+        2)
+            # Remove mass-generated only
+            local MASS_COUNT=$(jq -r '[.clients[] | select(.mass_generated == true)] | length' "$CLIENTS_DB" 2>/dev/null || echo "0")
+
+            if [[ "$MASS_COUNT" -eq 0 ]]; then
+                print_color $YELLOW "  No mass-generated clients found"
+                read -p "  Press Enter to return..."
+                return
+            fi
+
+            print_color $YELLOW "  Found ${BOLD}$MASS_COUNT${NC}${YELLOW} mass-generated clients"
+            echo
+            read -p "  Remove all $MASS_COUNT mass-generated clients? (yes/no): " CONFIRM
+            [[ "$CONFIRM" != "yes" ]] && return
+
+            # Get UUIDs and short IDs
+            local MASS_UUIDS=$(jq -r '.clients[] | select(.mass_generated == true) | .uuid' "$CLIENTS_DB" 2>/dev/null)
+            local MASS_SHORTIDS=$(jq -r '.clients[] | select(.mass_generated == true) | .shortId' "$CLIENTS_DB" 2>/dev/null)
+
+            # Remove from config
+            while IFS= read -r uuid; do
+                [[ -z "$uuid" ]] && continue
+                jq --arg id "$uuid" \
+                   'del(.inbounds[0].settings.clients[] | select(.id == $id))' \
+                   "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+            done <<< "$MASS_UUIDS"
+
+            # Remove short IDs
+            while IFS= read -r shortid; do
+                [[ -z "$shortid" ]] && continue
+                jq --arg sid "$shortid" \
+                   '.inbounds[0].streamSettings.realitySettings.shortIds -= [$sid]' \
+                   "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+            done <<< "$MASS_SHORTIDS"
+
+            # Remove from database
+            jq 'del(.clients[] | select(.mass_generated == true))' \
+               "$CLIENTS_DB" > "${CLIENTS_DB}.tmp" && mv "${CLIENTS_DB}.tmp" "$CLIENTS_DB"
+
+            print_color $GREEN "  ${CHECK} Removed $MASS_COUNT mass-generated clients"
+            ;;
+
+        3)
+            # Remove by range
+            echo
+            print_color $CYAN "  Enter the prefix and range to remove:"
+            echo
+            read -p "  Prefix (e.g., MIGA): " PREFIX
+            read -p "  Start number (e.g., 1): " START_NUM
+            read -p "  End number (e.g., 50): " END_NUM
+
+            if [[ -z "$PREFIX" ]] || [[ -z "$START_NUM" ]] || [[ -z "$END_NUM" ]]; then
+                print_color $RED "  ${CROSS} Invalid input"
+                read -p "  Press Enter to return..."
+                return
+            fi
+
+            if ! [[ "$START_NUM" =~ ^[0-9]+$ ]] || ! [[ "$END_NUM" =~ ^[0-9]+$ ]]; then
+                print_color $RED "  ${CROSS} Numbers must be integers"
+                read -p "  Press Enter to return..."
+                return
+            fi
+
+            if [[ $START_NUM -gt $END_NUM ]]; then
+                print_color $RED "  ${CROSS} Start must be less than or equal to end"
+                read -p "  Press Enter to return..."
+                return
+            fi
+
+            local RANGE_COUNT=$((END_NUM - START_NUM + 1))
+            print_color $YELLOW "  Will remove: ${PREFIX}_$(printf "%03d" $START_NUM) to ${PREFIX}_$(printf "%03d" $END_NUM)"
+            print_color $YELLOW "  Total: ${BOLD}$RANGE_COUNT${NC}${YELLOW} clients"
+            echo
+            read -p "  Proceed? (yes/no): " CONFIRM
+            [[ "$CONFIRM" != "yes" ]] && return
+
+            local REMOVED=0
+            for i in $(seq $START_NUM $END_NUM); do
+                local CLIENT_NAME=$(printf "%s_%03d" "$PREFIX" "$i")
+
+                # Get UUID and short ID
+                local UUID=$(jq -r --arg email "$CLIENT_NAME" '.clients[] | select(.email == $email) | .uuid' "$CLIENTS_DB" 2>/dev/null)
+                local SHORT_ID=$(jq -r --arg email "$CLIENT_NAME" '.clients[] | select(.email == $email) | .shortId' "$CLIENTS_DB" 2>/dev/null)
+
+                if [[ -n "$UUID" ]] && [[ "$UUID" != "null" ]]; then
+                    # Remove from config
+                    jq --arg id "$UUID" \
+                       'del(.inbounds[0].settings.clients[] | select(.id == $id))' \
+                       "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+                    # Remove short ID
+                    if [[ -n "$SHORT_ID" ]] && [[ "$SHORT_ID" != "null" ]]; then
+                        jq --arg sid "$SHORT_ID" \
+                           '.inbounds[0].streamSettings.realitySettings.shortIds -= [$sid]' \
+                           "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+                    fi
+
+                    # Remove from database
+                    jq --arg email "$CLIENT_NAME" \
+                       'del(.clients[] | select(.email == $email))' \
+                       "$CLIENTS_DB" > "${CLIENTS_DB}.tmp" && mv "${CLIENTS_DB}.tmp" "$CLIENTS_DB"
+
+                    REMOVED=$((REMOVED + 1))
+                fi
+
+                # Progress
+                printf "\r  Removing... %d/%d" "$((i - START_NUM + 1))" "$RANGE_COUNT"
+            done
+            echo
+            print_color $GREEN "  ${CHECK} Removed $REMOVED clients"
+            ;;
+
+        4)
+            # Remove ALL
+            print_color $RED "  ╔════════════════════════════════════════════════════╗"
+            print_color $RED "  ║  ${BOLD}WARNING: THIS WILL REMOVE ALL $TOTAL_CLIENTS CLIENTS!${NC}${RED}    ║"
+            print_color $RED "  ╚════════════════════════════════════════════════════╝"
+            echo
+            print_color $YELLOW "  Type 'DELETE ALL CLIENTS' to confirm:"
+            read -p "  > " CONFIRM
+
+            if [[ "$CONFIRM" != "DELETE ALL CLIENTS" ]]; then
+                print_color $YELLOW "  Cancelled."
+                read -p "  Press Enter to return..."
+                return
+            fi
+
+            # Clear all clients from config
+            jq '.inbounds[0].settings.clients = []' \
+               "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+            # Keep only the default short ID
+            jq '.inbounds[0].streamSettings.realitySettings.shortIds = [""]' \
+               "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+            # Clear database
+            echo '{"clients":[]}' > "$CLIENTS_DB"
+
+            print_color $GREEN "  ${CHECK} Removed ALL $TOTAL_CLIENTS clients"
+            ;;
+
+        5)
+            # Interactive selection
+            echo
+            print_color $CYAN "  Available clients:"
+            echo
+
+            # Get all clients into array
+            local CLIENT_EMAILS=()
+            local CLIENT_UUIDS=()
+            local CLIENT_SHORTIDS=()
+
+            while IFS= read -r line; do
+                CLIENT_EMAILS+=("$line")
+            done < <(jq -r '.clients[].email' "$CLIENTS_DB" 2>/dev/null)
+
+            while IFS= read -r line; do
+                CLIENT_UUIDS+=("$line")
+            done < <(jq -r '.clients[].uuid' "$CLIENTS_DB" 2>/dev/null)
+
+            while IFS= read -r line; do
+                CLIENT_SHORTIDS+=("$line")
+            done < <(jq -r '.clients[].shortId' "$CLIENTS_DB" 2>/dev/null)
+
+            # Display with numbers
+            for i in "${!CLIENT_EMAILS[@]}"; do
+                printf "    %3d) %s\n" "$((i + 1))" "${CLIENT_EMAILS[$i]}"
+            done
+            echo
+
+            print_color $CYAN "  Enter numbers to remove (comma-separated, e.g., 1,3,5-10):"
+            read -p "  > " SELECTION
+
+            if [[ -z "$SELECTION" ]]; then
+                print_color $YELLOW "  No selection made"
+                read -p "  Press Enter to return..."
+                return
+            fi
+
+            # Parse selection
+            local TO_REMOVE=()
+            IFS=',' read -ra PARTS <<< "$SELECTION"
+            for part in "${PARTS[@]}"; do
+                part=$(echo "$part" | tr -d ' ')
+                if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                    # Range
+                    local start="${BASH_REMATCH[1]}"
+                    local end="${BASH_REMATCH[2]}"
+                    for ((j=start; j<=end; j++)); do
+                        [[ $j -ge 1 && $j -le ${#CLIENT_EMAILS[@]} ]] && TO_REMOVE+=($((j - 1)))
+                    done
+                elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                    # Single number
+                    [[ $part -ge 1 && $part -le ${#CLIENT_EMAILS[@]} ]] && TO_REMOVE+=($((part - 1)))
+                fi
+            done
+
+            # Remove duplicates and sort
+            TO_REMOVE=($(printf '%s\n' "${TO_REMOVE[@]}" | sort -rn | uniq))
+
+            if [[ ${#TO_REMOVE[@]} -eq 0 ]]; then
+                print_color $RED "  ${CROSS} No valid selections"
+                read -p "  Press Enter to return..."
+                return
+            fi
+
+            echo
+            print_color $YELLOW "  Will remove ${#TO_REMOVE[@]} clients:"
+            for idx in "${TO_REMOVE[@]}"; do
+                echo "    • ${CLIENT_EMAILS[$idx]}"
+            done
+            echo
+            read -p "  Proceed? (yes/no): " CONFIRM
+            [[ "$CONFIRM" != "yes" ]] && return
+
+            # Remove selected clients (in reverse order to maintain indices)
+            local REMOVED=0
+            for idx in "${TO_REMOVE[@]}"; do
+                local EMAIL="${CLIENT_EMAILS[$idx]}"
+                local UUID="${CLIENT_UUIDS[$idx]}"
+                local SHORTID="${CLIENT_SHORTIDS[$idx]}"
+
+                # Remove from config
+                jq --arg id "$UUID" \
+                   'del(.inbounds[0].settings.clients[] | select(.id == $id))' \
+                   "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+                # Remove short ID
+                if [[ -n "$SHORTID" ]] && [[ "$SHORTID" != "null" ]]; then
+                    jq --arg sid "$SHORTID" \
+                       '.inbounds[0].streamSettings.realitySettings.shortIds -= [$sid]' \
+                       "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+                fi
+
+                # Remove from database
+                jq --arg email "$EMAIL" \
+                   'del(.clients[] | select(.email == $email))' \
+                   "$CLIENTS_DB" > "${CLIENTS_DB}.tmp" && mv "${CLIENTS_DB}.tmp" "$CLIENTS_DB"
+
+                REMOVED=$((REMOVED + 1))
+            done
+
+            print_color $GREEN "  ${CHECK} Removed $REMOVED clients"
+            ;;
+
+        0)
+            return
+            ;;
+
+        *)
+            print_color $RED "  ${CROSS} Invalid option"
+            read -p "  Press Enter to return..."
+            return
+            ;;
+    esac
+
+    # Restart service if running
+    if systemctl is-active --quiet xray; then
+        echo
+        print_color $CYAN "  Restarting Xray service..."
+        systemctl restart xray
+        if systemctl is-active --quiet xray; then
+            print_color $GREEN "  ${CHECK} Xray service restarted successfully"
+        else
+            print_color $RED "  ${CROSS} Service failed to restart!"
+        fi
+    fi
+
+    echo
+    local NEW_TOTAL=$(jq -r '.clients | length' "$CLIENTS_DB" 2>/dev/null || echo "0")
+    print_color $CYAN "  Remaining clients: ${BOLD}$NEW_TOTAL${NC}"
+    echo
+    read -p "  Press Enter to return..."
 }
 
 # Function to list clients
@@ -2981,7 +3870,14 @@ optimize_system_performance() {
     print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
     echo
     print_color $YELLOW "This will optimize your system for maximum Xray performance."
-    print_color $YELLOW "Changes include: sysctl tuning, ulimits, and service limits."
+    print_color $CYAN "Optimizations include:"
+    echo "    • BBR congestion control (2-3x throughput improvement)"
+    echo "    • Kernel network buffers (for high-latency connections)"
+    echo "    • File descriptor limits (1M connections support)"
+    echo "    • Systemd service limits"
+    echo "    • TCP/IP stack tuning"
+    echo
+    print_color $RED "  ${BULLET} A system reboot is required for all changes to take effect!"
     echo
     read -p "Continue with optimization? (y/n): " CONFIRM
     if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
@@ -2990,9 +3886,42 @@ optimize_system_performance() {
     fi
     echo
 
-    # ========== SYSCTL OPTIMIZATION ==========
+    # Track optimization status
+    local OPT_BBR=0
+    local OPT_BUFFERS=0
+    local OPT_SYSCTL=0
+    local OPT_LIMITS=0
+    local OPT_SYSTEMD=0
+    local OPT_XRAY_SERVICE=0
+    local OPT_PAM=0
+    local NEEDS_REBOOT=0
+
+    # ========== 1. BBR CONGESTION CONTROL ==========
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    print_color $BOLD$GREEN "1. APPLYING SYSCTL OPTIMIZATIONS"
+    print_color $BOLD$GREEN "1. ENABLING BBR CONGESTION CONTROL"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local CURRENT_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+    print_color $CYAN "  Current congestion control: ${YELLOW}$CURRENT_CC${NC}"
+
+    if [[ "$CURRENT_CC" == "bbr" ]]; then
+        print_color $GREEN "  ${CHECK} BBR is already enabled"
+        OPT_BBR=1
+    else
+        # Check if BBR module is available
+        if modprobe tcp_bbr 2>/dev/null || grep -q "bbr" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+            print_color $GREEN "  ${CHECK} BBR module available, will be enabled"
+            NEEDS_REBOOT=1
+        else
+            print_color $YELLOW "  ${BULLET} BBR not available on this kernel"
+            print_color $YELLOW "  ${BULLET} Consider upgrading to kernel 4.9+ for BBR support"
+        fi
+    fi
+    echo
+
+    # ========== 2. SYSCTL OPTIMIZATION (includes BBR + Buffers) ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "2. APPLYING KERNEL NETWORK OPTIMIZATIONS"
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     local SYSCTL_CONF="/etc/sysctl.d/99-xray-performance.conf"
@@ -3004,12 +3933,20 @@ optimize_system_performance() {
     fi
 
     cat > "$SYSCTL_CONF" << 'EOF'
+# ============================================================
 # Xray Performance Optimization - Generated by xray-manager.sh
-# Maximum file descriptors
+# Optimized for high-throughput proxy server
+# ============================================================
+
+# ----- BBR Congestion Control (2-3x throughput improvement) -----
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# ----- Maximum File Descriptors -----
 fs.file-max = 2097152
 fs.nr_open = 2097152
 
-# Socket and network optimizations
+# ----- Socket Buffers (optimized for high-latency connections) -----
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = 65535
 net.core.rmem_max = 67108864
@@ -3018,11 +3955,15 @@ net.core.rmem_default = 1048576
 net.core.wmem_default = 1048576
 net.core.optmem_max = 65535
 
-# TCP optimizations
+# ----- TCP Buffer Sizes (important for Iran -> EU latency) -----
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+
+# ----- TCP Performance Tuning -----
 net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.tcp_max_tw_buckets = 2000000
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 10
@@ -3032,46 +3973,82 @@ net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_rfc1337 = 1
 net.ipv4.tcp_max_orphans = 262144
 net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
 
-# TCP buffer sizes
-net.ipv4.tcp_rmem = 4096 1048576 67108864
-net.ipv4.tcp_wmem = 4096 1048576 67108864
-
-# UDP optimizations
+# ----- UDP Optimizations -----
 net.ipv4.udp_rmem_min = 8192
 net.ipv4.udp_wmem_min = 8192
 
-# IP forwarding and routing
+# ----- IP Configuration -----
 net.ipv4.ip_forward = 1
 net.ipv4.ip_local_port_range = 1024 65535
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 
-# Connection tracking
+# ----- Connection Tracking -----
 net.netfilter.nf_conntrack_max = 2097152
 net.nf_conntrack_max = 2097152
 
-# IPv6 (optional, keep enabled)
+# ----- IPv6 -----
 net.ipv6.conf.all.forwarding = 1
 EOF
 
-    print_color $GREEN "  ${CHECK} Created sysctl configuration"
+    print_color $GREEN "  ${CHECK} Created sysctl configuration with BBR + buffers"
+    OPT_SYSCTL=1
 
     # Apply sysctl settings
     print_color $CYAN "  ${BULLET} Applying sysctl settings..."
-    sysctl -p "$SYSCTL_CONF" 2>/dev/null || sysctl --system 2>/dev/null
-    print_color $GREEN "  ${CHECK} Sysctl settings applied"
+    if sysctl -p "$SYSCTL_CONF" 2>/dev/null; then
+        print_color $GREEN "  ${CHECK} Sysctl settings applied"
+        OPT_BUFFERS=1
+
+        # Check if BBR was activated
+        local NEW_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+        if [[ "$NEW_CC" == "bbr" ]]; then
+            print_color $GREEN "  ${CHECK} BBR congestion control is now active"
+            OPT_BBR=1
+        else
+            print_color $YELLOW "  ${BULLET} BBR will be active after reboot"
+            NEEDS_REBOOT=1
+        fi
+    else
+        sysctl --system 2>/dev/null
+        print_color $YELLOW "  ${BULLET} Some settings may require reboot"
+        NEEDS_REBOOT=1
+    fi
     echo
 
-    # ========== ULIMIT OPTIMIZATION ==========
+    # ========== 3. FILE DESCRIPTOR LIMITS ==========
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    print_color $BOLD$GREEN "2. APPLYING ULIMIT OPTIMIZATIONS"
+    print_color $BOLD$GREEN "3. CONFIGURING FILE DESCRIPTOR LIMITS"
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    local LIMITS_CONF="/etc/security/limits.d/99-xray-performance.conf"
+    # System-wide limits in /etc/security/limits.conf
+    local LIMITS_MARKER="# Xray Performance Limits"
+    if ! grep -q "$LIMITS_MARKER" /etc/security/limits.conf 2>/dev/null; then
+        cat >> /etc/security/limits.conf << EOF
 
-    cat > "$LIMITS_CONF" << 'EOF'
-# Xray Performance - Ulimit Configuration
+$LIMITS_MARKER
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+* soft nproc 65535
+* hard nproc 65535
+root soft nproc 65535
+root hard nproc 65535
+EOF
+        print_color $GREEN "  ${CHECK} Added limits to /etc/security/limits.conf"
+    else
+        print_color $CYAN "  ${BULLET} Limits already in /etc/security/limits.conf"
+    fi
+
+    # Also create limits.d file for redundancy
+    local LIMITS_D_CONF="/etc/security/limits.d/99-xray-performance.conf"
+    cat > "$LIMITS_D_CONF" << 'EOF'
+# Xray Performance - File Descriptor Limits
 * soft nofile 1048576
 * hard nofile 1048576
 * soft nproc 65535
@@ -3081,13 +4058,49 @@ root hard nofile 1048576
 root soft nproc 65535
 root hard nproc 65535
 EOF
-
-    print_color $GREEN "  ${CHECK} Created ulimit configuration"
+    print_color $GREEN "  ${CHECK} Created $LIMITS_D_CONF"
+    OPT_LIMITS=1
+    NEEDS_REBOOT=1
     echo
 
-    # ========== SYSTEMD SERVICE OPTIMIZATION ==========
+    # ========== 4. SYSTEMD DEFAULT LIMITS ==========
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    print_color $BOLD$GREEN "3. OPTIMIZING XRAY SERVICE"
+    print_color $BOLD$GREEN "4. CONFIGURING SYSTEMD DEFAULT LIMITS"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Update /etc/systemd/system.conf
+    if [[ -f /etc/systemd/system.conf ]]; then
+        # Backup
+        cp /etc/systemd/system.conf /etc/systemd/system.conf.bak.$(date +%Y%m%d%H%M%S)
+
+        # Update or add DefaultLimitNOFILE
+        if grep -q "^#*DefaultLimitNOFILE" /etc/systemd/system.conf; then
+            sed -i 's/^#*DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576/' /etc/systemd/system.conf
+        else
+            echo "DefaultLimitNOFILE=1048576" >> /etc/systemd/system.conf
+        fi
+        print_color $GREEN "  ${CHECK} Updated /etc/systemd/system.conf"
+    fi
+
+    # Update /etc/systemd/user.conf
+    if [[ -f /etc/systemd/user.conf ]]; then
+        cp /etc/systemd/user.conf /etc/systemd/user.conf.bak.$(date +%Y%m%d%H%M%S)
+
+        if grep -q "^#*DefaultLimitNOFILE" /etc/systemd/user.conf; then
+            sed -i 's/^#*DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576/' /etc/systemd/user.conf
+        else
+            echo "DefaultLimitNOFILE=1048576" >> /etc/systemd/user.conf
+        fi
+        print_color $GREEN "  ${CHECK} Updated /etc/systemd/user.conf"
+    fi
+
+    OPT_SYSTEMD=1
+    NEEDS_REBOOT=1
+    echo
+
+    # ========== 5. XRAY SERVICE OPTIMIZATION ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "5. OPTIMIZING XRAY SERVICE"
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # Create systemd override directory
@@ -3103,43 +4116,157 @@ TasksMax=infinity
 EOF
 
     print_color $GREEN "  ${CHECK} Created Xray service override"
-
-    # Reload systemd
-    print_color $CYAN "  ${BULLET} Reloading systemd daemon..."
-    systemctl daemon-reload
-    print_color $GREEN "  ${CHECK} Systemd reloaded"
+    OPT_XRAY_SERVICE=1
     echo
 
-    # ========== PAM LIMITS ==========
+    # ========== 6. PAM LIMITS ==========
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    print_color $BOLD$GREEN "4. CONFIGURING PAM LIMITS"
+    print_color $BOLD$GREEN "6. CONFIGURING PAM LIMITS"
     print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # Ensure pam_limits is loaded
-    if ! grep -q "pam_limits.so" /etc/pam.d/common-session 2>/dev/null; then
-        echo "session required pam_limits.so" >> /etc/pam.d/common-session
-        print_color $GREEN "  ${CHECK} Added pam_limits to common-session"
-    else
-        print_color $CYAN "  ${BULLET} pam_limits already configured"
+    if [[ -f /etc/pam.d/common-session ]]; then
+        if ! grep -q "pam_limits.so" /etc/pam.d/common-session; then
+            echo "session required pam_limits.so" >> /etc/pam.d/common-session
+            print_color $GREEN "  ${CHECK} Added pam_limits to common-session"
+        else
+            print_color $CYAN "  ${BULLET} pam_limits already in common-session"
+        fi
     fi
 
-    if ! grep -q "pam_limits.so" /etc/pam.d/common-session-noninteractive 2>/dev/null; then
-        echo "session required pam_limits.so" >> /etc/pam.d/common-session-noninteractive
-        print_color $GREEN "  ${CHECK} Added pam_limits to common-session-noninteractive"
-    else
-        print_color $CYAN "  ${BULLET} pam_limits already configured for non-interactive"
+    if [[ -f /etc/pam.d/common-session-noninteractive ]]; then
+        if ! grep -q "pam_limits.so" /etc/pam.d/common-session-noninteractive; then
+            echo "session required pam_limits.so" >> /etc/pam.d/common-session-noninteractive
+            print_color $GREEN "  ${CHECK} Added pam_limits to common-session-noninteractive"
+        else
+            print_color $CYAN "  ${BULLET} pam_limits already in common-session-noninteractive"
+        fi
+    fi
+    OPT_PAM=1
+    echo
+
+    # ========== 7. RELOAD SYSTEMD ==========
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "7. RELOADING SYSTEM CONFIGURATION"
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    print_color $CYAN "  ${BULLET} Reloading systemd daemon..."
+    systemctl daemon-reload
+    systemctl daemon-reexec 2>/dev/null || true
+    print_color $GREEN "  ${CHECK} Systemd reloaded"
+
+    # Restart Xray if running
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        print_color $CYAN "  ${BULLET} Restarting Xray service..."
+        systemctl restart xray
+        print_color $GREEN "  ${CHECK} Xray service restarted with new limits"
     fi
     echo
 
-    # ========== RESTART XRAY IF RUNNING ==========
-    if systemctl is-active --quiet xray 2>/dev/null; then
-        print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        print_color $BOLD$GREEN "5. RESTARTING XRAY SERVICE"
-        print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        systemctl restart xray
-        print_color $GREEN "  ${CHECK} Xray service restarted with new limits"
-        echo
+    # ========== VERIFICATION CHECKLIST ==========
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║              VERIFICATION CHECKLIST                         ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    local ALL_PASSED=1
+
+    # Check 1: BBR
+    local VERIFY_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+    if [[ "$VERIFY_CC" == "bbr" ]]; then
+        print_color $GREEN "  [${CHECK}] BBR Congestion Control: ACTIVE"
+    else
+        print_color $YELLOW "  [!] BBR Congestion Control: PENDING REBOOT (currently: $VERIFY_CC)"
+        ALL_PASSED=0
     fi
+
+    # Check 2: Queue discipline
+    local VERIFY_QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+    if [[ "$VERIFY_QDISC" == "fq" ]]; then
+        print_color $GREEN "  [${CHECK}] Queue Discipline (fq): ACTIVE"
+    else
+        print_color $YELLOW "  [!] Queue Discipline: PENDING REBOOT (currently: $VERIFY_QDISC)"
+        ALL_PASSED=0
+    fi
+
+    # Check 3: TCP buffer max
+    local VERIFY_RMEM=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "0")
+    if [[ "$VERIFY_RMEM" -ge 67108864 ]]; then
+        print_color $GREEN "  [${CHECK}] TCP Receive Buffer Max: 64MB"
+    else
+        print_color $YELLOW "  [!] TCP Receive Buffer: $(($VERIFY_RMEM / 1048576))MB (expected 64MB)"
+        ALL_PASSED=0
+    fi
+
+    local VERIFY_WMEM=$(sysctl -n net.core.wmem_max 2>/dev/null || echo "0")
+    if [[ "$VERIFY_WMEM" -ge 67108864 ]]; then
+        print_color $GREEN "  [${CHECK}] TCP Send Buffer Max: 64MB"
+    else
+        print_color $YELLOW "  [!] TCP Send Buffer: $(($VERIFY_WMEM / 1048576))MB (expected 64MB)"
+        ALL_PASSED=0
+    fi
+
+    # Check 4: File max
+    local VERIFY_FILEMAX=$(sysctl -n fs.file-max 2>/dev/null || echo "0")
+    if [[ "$VERIFY_FILEMAX" -ge 2097152 ]]; then
+        print_color $GREEN "  [${CHECK}] System File Max: $VERIFY_FILEMAX"
+    else
+        print_color $YELLOW "  [!] System File Max: $VERIFY_FILEMAX (expected 2097152)"
+        ALL_PASSED=0
+    fi
+
+    # Check 5: Limits.conf
+    if grep -q "nofile 1048576" /etc/security/limits.conf 2>/dev/null; then
+        print_color $GREEN "  [${CHECK}] /etc/security/limits.conf: CONFIGURED"
+    else
+        print_color $YELLOW "  [!] /etc/security/limits.conf: NOT CONFIGURED"
+        ALL_PASSED=0
+    fi
+
+    # Check 6: Systemd limits
+    if grep -q "DefaultLimitNOFILE=1048576" /etc/systemd/system.conf 2>/dev/null; then
+        print_color $GREEN "  [${CHECK}] Systemd system.conf: CONFIGURED"
+    else
+        print_color $YELLOW "  [!] Systemd system.conf: NOT CONFIGURED"
+        ALL_PASSED=0
+    fi
+
+    # Check 7: Xray service override
+    if [[ -f /etc/systemd/system/xray.service.d/override.conf ]]; then
+        print_color $GREEN "  [${CHECK}] Xray Service Override: CONFIGURED"
+    else
+        print_color $YELLOW "  [!] Xray Service Override: NOT FOUND"
+        ALL_PASSED=0
+    fi
+
+    # Check 8: Current ulimit (for this session)
+    local CURRENT_ULIMIT=$(ulimit -n 2>/dev/null || echo "0")
+    if [[ "$CURRENT_ULIMIT" -ge 1048576 ]]; then
+        print_color $GREEN "  [${CHECK}] Current Session ulimit: $CURRENT_ULIMIT"
+    else
+        print_color $YELLOW "  [!] Current Session ulimit: $CURRENT_ULIMIT (will be 1048576 after reboot)"
+        ALL_PASSED=0
+    fi
+
+    # Check 9: TCP tw_reuse
+    local VERIFY_TWREUSE=$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null || echo "0")
+    if [[ "$VERIFY_TWREUSE" == "1" ]]; then
+        print_color $GREEN "  [${CHECK}] TCP TIME_WAIT Reuse: ENABLED"
+    else
+        print_color $YELLOW "  [!] TCP TIME_WAIT Reuse: DISABLED"
+        ALL_PASSED=0
+    fi
+
+    # Check 10: TCP fin_timeout
+    local VERIFY_FINTIMEOUT=$(sysctl -n net.ipv4.tcp_fin_timeout 2>/dev/null || echo "60")
+    if [[ "$VERIFY_FINTIMEOUT" -le 15 ]]; then
+        print_color $GREEN "  [${CHECK}] TCP FIN Timeout: ${VERIFY_FINTIMEOUT}s"
+    else
+        print_color $YELLOW "  [!] TCP FIN Timeout: ${VERIFY_FINTIMEOUT}s (expected ≤15s)"
+        ALL_PASSED=0
+    fi
+
+    echo
 
     # ========== SUMMARY ==========
     print_color $BOLD$GREEN "╔════════════════════════════════════════════════════════════╗"
@@ -3147,22 +4274,66 @@ EOF
     print_color $BOLD$GREEN "╚════════════════════════════════════════════════════════════╝"
     echo
     print_color $CYAN "  Applied optimizations:"
-    print_color $GREEN "    ${CHECK} Kernel parameters (sysctl)"
-    print_color $GREEN "    ${CHECK} File descriptor limits (ulimit)"
-    print_color $GREEN "    ${CHECK} Systemd service limits"
-    print_color $GREEN "    ${CHECK} PAM limits configuration"
-    echo
-    print_color $YELLOW "  New limits (effective after reboot or new session):"
-    print_color $CYAN "    • Max open files:      1,048,576"
-    print_color $CYAN "    • Max connections:     65,535"
-    print_color $CYAN "    • TCP buffer max:      64 MB"
-    print_color $CYAN "    • Connection tracking: 2,097,152"
-    echo
-    print_color $BOLD$YELLOW "  NOTE: Some changes require a system reboot to take full effect."
-    print_color $CYAN "  Run option 29 (Benchmark) again to verify optimization."
+    [[ $OPT_BBR -eq 1 ]] && print_color $GREEN "    ${CHECK} BBR congestion control" || print_color $YELLOW "    ${BULLET} BBR (pending reboot)"
+    [[ $OPT_BUFFERS -eq 1 ]] && print_color $GREEN "    ${CHECK} Network buffers (64MB)" || print_color $YELLOW "    ${BULLET} Network buffers (pending)"
+    [[ $OPT_SYSCTL -eq 1 ]] && print_color $GREEN "    ${CHECK} Kernel parameters (sysctl)"
+    [[ $OPT_LIMITS -eq 1 ]] && print_color $GREEN "    ${CHECK} File descriptor limits (1M)"
+    [[ $OPT_SYSTEMD -eq 1 ]] && print_color $GREEN "    ${CHECK} Systemd default limits"
+    [[ $OPT_XRAY_SERVICE -eq 1 ]] && print_color $GREEN "    ${CHECK} Xray service limits"
+    [[ $OPT_PAM -eq 1 ]] && print_color $GREEN "    ${CHECK} PAM limits configuration"
     echo
 
-    read -p "Press Enter to return to menu..."
+    print_color $YELLOW "  Expected performance improvements:"
+    print_color $CYAN "    • 2-3x throughput with BBR"
+    print_color $CYAN "    • Better handling of high-latency connections"
+    print_color $CYAN "    • Support for 1M+ concurrent connections"
+    print_color $CYAN "    • Faster connection recycling"
+    echo
+
+    # ========== REBOOT PROMPT ==========
+    if [[ $NEEDS_REBOOT -eq 1 ]] || [[ $ALL_PASSED -eq 0 ]]; then
+        print_color $BOLD$RED "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        print_color $BOLD$RED "          SYSTEM REBOOT REQUIRED"
+        print_color $BOLD$RED "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo
+        print_color $YELLOW "  A system reboot is required for all optimizations to take effect."
+        print_color $YELLOW "  This includes:"
+        print_color $CYAN "    • BBR congestion control activation"
+        print_color $CYAN "    • New file descriptor limits"
+        print_color $CYAN "    • Systemd limit changes"
+        echo
+        print_color $BOLD$YELLOW "  Would you like to reboot now?"
+        print_color $CYAN "  The system will reboot in 10 seconds after confirmation."
+        print_color $CYAN "  You can reconnect via SSH after ~30 seconds."
+        echo
+        read -p "  Reboot now? (yes/no): " REBOOT_CONFIRM
+
+        if [[ "$REBOOT_CONFIRM" == "yes" ]]; then
+            echo
+            print_color $BOLD$GREEN "  ${CHECK} Reboot confirmed!"
+            print_color $YELLOW "  System will reboot in 10 seconds..."
+            print_color $CYAN "  Press Ctrl+C to cancel"
+            echo
+
+            for i in 10 9 8 7 6 5 4 3 2 1; do
+                printf "\r  Rebooting in ${BOLD}%2d${NC} seconds... " "$i"
+                sleep 1
+            done
+            echo
+            print_color $GREEN "  Rebooting now! See you in ~30 seconds..."
+            sleep 1
+            reboot
+        else
+            echo
+            print_color $YELLOW "  Reboot skipped. Remember to reboot manually later:"
+            print_color $CYAN "    sudo reboot"
+            echo
+            print_color $CYAN "  Or run this command to reboot:"
+            print_color $CYAN "    systemctl reboot"
+        fi
+    else
+        print_color $GREEN "  All optimizations are active! No reboot needed."
+    fi
 }
 
 # ============================================================================
@@ -3849,14 +5020,15 @@ show_menu() {
     echo "    1)  Install Xray Core"
     echo "    2)  Configure VLESS + REALITY"
     echo "    3)  Uninstall Xray"
+    echo "    4)  Version Management (Install/Switch/Rollback)"
     echo
 
     print_color $CYAN "  ${BOLD}Service Control${NC}"
-    echo "    4)  Start service"
-    echo "    5)  Stop service"
-    echo "    6)  Restart service"
-    echo "    7)  Enable auto-start"
-    echo "    8)  Disable auto-start"
+    echo "    5)  Start service"
+    echo "    6)  Stop service"
+    echo "    7)  Restart service"
+    echo "    8)  Enable auto-start"
+    echo "    9)  Disable auto-start"
     echo
 
     print_color $CYAN "  ${BOLD}Client Management${NC}"
@@ -3890,10 +5062,11 @@ show_menu() {
     echo "    28) DPI & Leak Security Test ${GREEN}★${NC}"
     echo
 
-    print_color $CYAN "  ${BOLD}Performance & Mass Tools${NC} ${MAGENTA}★ NEW${NC}"
+    print_color $CYAN "  ${BOLD}Performance & Mass Tools${NC} ${MAGENTA}★${NC}"
     echo "    29) Server Benchmark & Recommendations"
     echo "    30) Optimize System for Maximum Performance"
     echo "    31) Mass Config Generator (Bulk + QR Codes)"
+    echo "    32) Mass Client Remover"
     echo
 
     print_color $BOLD$BLUE "└─────────────────────────────────────────────────────────────┘"
@@ -3918,11 +5091,12 @@ main() {
                 1) install_xray ;;
                 2) configure_xray ;;
                 3) uninstall_xray ;;
-                4) start_service ;;
-                5) stop_service ;;
-                6) restart_service ;;
-                7) enable_service ;;
-                8) disable_service ;;
+                4) version_management_menu ;;
+                5) start_service ;;
+                6) stop_service ;;
+                7) restart_service ;;
+                8) enable_service ;;
+                9) disable_service ;;
                 10) add_client_wizard ;;
                 11) remove_client ;;
                 12) list_clients ;;
@@ -3945,6 +5119,7 @@ main() {
                 29) server_benchmark ;;
                 30) optimize_system_performance ;;
                 31) mass_config_generator ;;
+                32) mass_remove_clients ;;
                 0) exit 0 ;;
                 *) print_color $RED "Invalid choice" ;;
             esac
@@ -3985,6 +5160,36 @@ main() {
             benchmark|bench) server_benchmark ;;
             optimize|perf) optimize_system_performance ;;
             mass-generate|mass|bulk) mass_config_generator ;;
+            mass-remove) mass_remove_clients ;;
+            version)
+                local VER=$(get_installed_version)
+                if [[ "$VER" != "not-installed" ]]; then
+                    echo "Xray Core version: $VER"
+                else
+                    echo "Xray is not installed"
+                fi
+                ;;
+            switch-version)
+                if [[ -n "$2" ]]; then
+                    if validate_version_format "$2"; then
+                        install_xray "$2"
+                    else
+                        print_color $RED "Invalid version format: $2"
+                        echo "Example: $0 switch-version 25.10.15"
+                        exit 1
+                    fi
+                else
+                    install_specific_version
+                fi
+                ;;
+            rollback) rollback_xray_version ;;
+            list-versions)
+                echo "Currently installed: $(get_installed_version)"
+                echo ""
+                echo "Available versions:"
+                fetch_available_versions
+                ;;
+            versions|version-menu) version_management_menu ;;
             *)
                 print_color $RED "Unknown command: $1"
                 echo
@@ -4021,6 +5226,14 @@ main() {
                 echo "  benchmark        - Run server benchmark & get recommendations"
                 echo "  optimize         - Optimize system for maximum performance"
                 echo "  mass-generate    - Generate multiple configs with QR codes"
+                echo "  mass-remove      - Mass remove clients (pattern/range/all)"
+                echo
+                print_color $CYAN "Version management:"
+                echo "  version          - Show current Xray version"
+                echo "  switch-version   - Switch to specific version (e.g., switch-version 25.10.15)"
+                echo "  rollback         - Rollback to a previous backed-up version"
+                echo "  list-versions    - List available versions from GitHub"
+                echo "  versions         - Open version management menu"
                 echo
                 print_color $YELLOW "Run without arguments for interactive menu"
                 exit 1

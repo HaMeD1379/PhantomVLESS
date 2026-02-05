@@ -6,22 +6,9 @@ This project is a single, feature-rich Bash script that turns a plain Linux VPS 
 - **Security:** XTLS-Vision + REALITY + uTLS
 - **Entry point:** `xray-manager.sh`
 
-It wraps Xray Core, systemd, and a small set of helper files into a cohesive “control panel” you can run directly in your terminal.
+It wraps Xray Core, systemd, and a small set of helper files into a cohesive "control panel" you can run directly in your terminal.
 
-> **TL;DR:** Run one script on a fresh Debian/Ubuntu VPS, answer a few questions, and get a fully configured VLESS+REALITY server with client QR codes and connection guides.
-
----
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [How It Works at Runtime](#how-it-works-at-runtime)
-4. [Installation](#installation)
-5. [Configuration](#configuration)
-6. [Usage & Common Workflows](#usage--common-workflows)
-7. [Maintenance & Troubleshooting](#maintenance--troubleshooting)
-8. [Limitations & Security Notes](#limitations--security-notes)
+> **TL;DR:** Run one script on a fresh Debian/Ubuntu VPS, answer a few questions, and get a fully configured VLESS+REALITY server with client QR codes, mass config generation, and connection guides.
 
 ---
 
@@ -32,581 +19,383 @@ It wraps Xray Core, systemd, and a small set of helper files into a cohesive “
 `xray-manager.sh` is an interactive Bash-based manager for **Xray Core** configured as a:
 
 - VLESS inbound
-- secured by REALITY (X25519 key pair)
-- typically on port 443
-- impersonating popular TLS websites (e.g., Google, Cloudflare) without needing a real certificate or domain
-
-The script is designed to be:
-
-- **Beginner-friendly:** interactive menus, wizards, and detailed help text.
-- **Opinionated but flexible:** provides safe defaults while allowing customization.
-- **Self-contained:** no external web UI; everything is CLI-based.
-
-### Problems It Solves
-
-- Installing Xray Core correctly on a new VPS.
-- Generating and maintaining a secure REALITY configuration.
-- Managing clients (UUIDs/short IDs) and generating shareable connection info.
-- Starting/stopping and enabling/disabling the Xray systemd service.
-- Viewing logs and basic per-client statistics.
-- Running diagnostics and optionally removing old VPN setups (WireGuard, Caddy, wstunnel).
+- Secured by REALITY (X25519 key pair)
+- Typically on port 443
+- Impersonating popular TLS websites (e.g., Google, Cloudflare) without needing a real certificate or domain
 
 ### Key Features
 
-- One-command **install** and **configure** flow for VLESS + REALITY.
-- **Smart port selection**: Automatically scans system and suggests available high ports (443, 8443, 2053, 2083, 2087, 2096, 51820, 41234, 32145).
-- **Port validation**: Checks if chosen port is already in use and warns before proceeding.
-- **Auto-apply firewall rules**: Automatically configures UFW, iptables, or firewalld rules when available.
-- **IPv4 prioritization**: Forces IPv4 connections to prevent IPv6-only issues; handles dual-stack servers correctly.
-- **IP forwarding auto-enable**: Automatically enables kernel IP forwarding required for proxy traffic routing.
-- **Comprehensive firewall guide**: Displays step-by-step instructions for 7 major VPS providers (Hetzner, DigitalOcean, Vultr, AWS, Oracle, GCP, Linode).
-- Intuitive **TUI menu** with numbered actions.
-- **Client management** (add/list/remove) with automatic UUID & short ID generation.
-- **Connection export**:
-  - VLESS URLs
-  - Terminal QR codes
-  - Optional PNG QR files
-- **Systemd integration**:
-  - `xray.service` creation
-  - enable/disable/start/stop/restart helpers
-- **Logs & stats**:
-  - view, save, clear logs
-  - basic per-client connection stats
-- **Diagnostics & repair**:
-  - system and configuration diagnostics
-  - REALITY private key self-healing
-  - legacy VPN cleanup helper
-  - DPI/security evasion tests
-- Built-in **connection guides** for major platforms (Android, iOS, Windows, macOS, Linux).
+#### Core Features ✨
+- One-command **install** and **configure** flow for VLESS + REALITY
+- **Smart port selection** with automatic system scanning
+- **Auto-apply firewall rules** (UFW, iptables, firewalld)
+- **IPv4 prioritization** to prevent IPv6-only issues
+- **Comprehensive firewall guide** for 7 major VPS providers
+- Intuitive **TUI menu** with 32 numbered actions
+
+#### Client Management ✨
+- **Client management** (add/list/remove) with automatic UUID & short ID generation
+- **Mass Client Remover** (NEW): Remove by pattern, range, or interactive selection
+- **Connection export**: VLESS URLs, QR codes (ASCII & PNG)
+
+#### Version Management (NEW ✨)
+- **Install specific Xray Core version** (e.g., 25.10.15 vs 26)
+- **Automatic backup on version change**
+- **Rollback to previous version**
+- **Preserve existing clients** across version switches
+
+#### Performance Optimization (NEW ✨)
+- **BBR Congestion Control** (2-3x throughput improvement)
+- **Network buffer tuning** (64MB for high-latency connections)
+- **File descriptor optimization** (1M+ concurrent connections)
+- **TCP/IP stack tuning** for proxy server workloads
+- **Verification checklist** (10-point audit)
+- **Graceful reboot** with countdown
+
+#### Bulk Operations (NEW ✨)
+- **Mass Config Generator**: Create 1-1000 configs with QR codes
+- **HTML visual gallery** for client organization
+- **Complete configs list** with VLESS URLs
+
+#### System Management ✨
+- **Server Benchmark** (CPU, memory, disk, network analysis)
+- **Performance tier classification**
+- **Concurrent connection recommendations**
+- **Systemd integration** with proper resource limits
+- **DPI/security evasion tests**
+- **Connection guides** for all platforms (Android/iOS/Windows/macOS/Linux)
 
 ---
 
-## Architecture
+## Quick Start
 
-### High-Level Layout
-
-While the repository only contains `xray-manager.sh`, at runtime the script manages a small ecosystem of files and services:
-
-- **Manager script** (entry point)
-  - `/usr/local/bin/VPS_V2/xray-manager.sh`
-- **Xray Core binary**
-  - `/usr/local/bin/xray`
-- **Xray configuration & state** (under `/usr/local/etc/xray`)
-  - `config.json` — main Xray configuration (inbounds/outbounds/routing/logs)
-  - `clients.json` — higher-level client registry
-  - `public_key.txt` — REALITY public key (exported)
-  - `sni.txt` — SNI/server name used by clients
-  - `port.txt` — listening port (e.g., 443)
-  - `server_name.txt` — friendly name/hostname reference
-  - `backups/` — configuration backup archives
-- **Service definition**
-  - `/etc/systemd/system/xray.service` — systemd unit
-- **Logs**
-  - `/var/log/xray/access.log` — Xray access log
-  - `/var/log/xray/error.log` — Xray error log
-  - `journalctl -u xray` — systemd journal for the service
-
-The Bash script acts as a **control center** around these components: it reads/modifies JSON via `jq`, writes systemd units, and drives the Xray binary via systemd.
-
-### Main Script Components
-
-Internally, `xray-manager.sh` is organized into logical function groups. Names may vary slightly, but conceptually they fall into:
-
-1. **Environment & helpers**
-   - Root and environment checks
-   - Colored output helpers
-   - Utility wrappers for `systemctl`, `ss`, `curl`, `jq`, etc.
-
-2. **Install & setup**
-   - Install required packages
-   - Download and install Xray Core via the official script
-   - Create and enable the `xray.service` unit
-   - Enable kernel IP forwarding for proper traffic routing
-
-3. **Configuration & REALITY**
-   - Smart port selection with system scanning
-   - Port validation and conflict detection
-   - Interactive configuration wizard
-   - REALITY x25519 key generation
-   - Initial client UUID + short ID
-   - Writing `config.json`, `clients.json`, and helper text files
-   - Automatic local firewall rule application (UFW, iptables, firewalld)
-
-4. **Firewall & Network**
-   - System port scanner and availability checker
-   - Automatic local firewall configuration (UFW, iptables, firewalld)
-   - Comprehensive VPS provider firewall instructions (7 providers)
-   - IPv4-only connectivity verification
-
-5. **Client management**
-   - Add/remove/list clients
-   - Keep `config.json` and `clients.json` in sync
-   - Generate VLESS+REALITY URLs (with forced IPv4)
-   - Generate ASCII and (optionally) PNG QR codes
-
-6. **Service control**
-   - Start/stop/restart Xray
-   - Enable/disable on boot
-   - Basic status checks (is the binary installed, is the port open, etc.)
-
-6. **Monitoring, logs & stats**
-   - Colorful status dashboard (ports, processes, resource usage)
-   - View/tail/vacuum logs
-   - Export logs for support/debugging
-   - Basic per-client stats from the access log
-
-7. **Diagnostics & maintenance**
-   - System diagnostics ("health check")
-   - DPI/security evasion tests
-   - REALITY key sanity checks and repair
-   - Backups and restore of configuration
-   - Optional cleanup of legacy VPN tools
-   - Full uninstall flow for Xray
-
-### How Components Interact
-
-- The **script** is the only thing you run; it calls:
-  - **Xray** for config testing and actual packet handling.
-  - **systemd** for service management.
-  - **`jq`** to read and modify `config.json` and `clients.json`.
-- **REALITY** state (public key, SNI, port) is mirrored from `config.json` into small text files for easier reuse when building client URLs and QR codes.
-- **Client operations** always update both `config.json` and `clients.json`, then restart or reload the Xray service when needed.
-- **Logs** are written by Xray and systemd; the script only displays, archives, or truncates them.
-
----
-
-## How It Works at Runtime
-
-### Entry Points
-
-You typically invoke the script via:
+### Installation
 
 ```bash
-sudo /usr/local/bin/VPS_V2/xray-manager.sh
+sudo mkdir -p /usr/local/bin
+sudo cp xray-manager.sh /usr/local/bin/
+sudo chmod +x /usr/local/bin/xray-manager.sh
 ```
 
-With no arguments, it shows an **interactive menu** (TUI-like) containing options such as:
+### First-Time Setup
 
-- Install / Update Xray
-- Configure VLESS + REALITY
-- Add / List / Remove clients
-- Show status dashboard
-- Manage service (start/stop/restart/enable/disable)
-- View / Save / Clear logs
-- Run diagnostics and DPI/security tests
-- Remove old VPN systems
-- Uninstall Xray
+```bash
+sudo /usr/local/bin/xray-manager.sh
+```
 
-Some operations can also be wired to **direct subcommands** (depending on how you extend it), for example:
-
-- `xray-manager.sh add-client`
-- `xray-manager.sh list-clients`
-- `xray-manager.sh client-info`
-- `xray-manager.sh qr`
-
-The main design assumption is interactive, menu-driven use.
-
-### First-Time Setup Flow
-
-For a clean VPS:
-
-1. **Run the script as root.**  
-   It verifies root access and required utilities.
-
-2. **Install Xray & dependencies.**  
-   Via an "Install Xray" menu option, it:
-   - Installs tools such as `curl`, `wget`, `unzip`, `jq`, `qrencode`, `net-tools` if missing.
-   - Uses the official Xray install script to fetch the latest Xray Core.
-
-3. **Run the configuration wizard.**  
-   The VLESS+REALITY wizard will:
-   - **Smart port selection**: Scans your system for available ports and suggests the best option (443, 8443, 2053, 51820, etc.)
-   - Validates your port choice and warns if it's already in use
-   - Ask which **destination/SNI** to impersonate (Google, Cloudflare, or custom).
-   - Ask for a **server name** (often same as SNI or a domain you control).
-   - Generate the **REALITY key pair** and the first client's **UUID** and **short ID**.
-   - Write `config.json`, `clients.json`, and helper text files.
-   - Create or update `/etc/systemd/system/xray.service`.
-   - **Auto-apply local firewall rules** (ufw, iptables, or firewalld)
-   - Display comprehensive firewall instructions for major VPS providers
-
-4. **Enable and start the service.**  
-   With menu options for:
-   - Enable on boot.
-   - Start now.
-
-5. **Configure VPS provider firewall.**  
-   The script provides detailed, step-by-step instructions for:
-   - Hetzner Cloud
-   - DigitalOcean
-   - Vultr
-   - AWS EC2
-   - Oracle Cloud (OCI)
-   - Google Cloud (GCP)
-   - Linode/Akamai
-   
-   Plus verification commands to confirm your port is accessible.
-
-After this, the server is ready; you only need to create clients and export their connection info.
-
-### Ongoing Operations
-
-Most day-to-day interaction is:
-
-- Adding/removing clients.
-- Viewing their connection URLs/QR codes.
-- Checking status and logs.
-- Running diagnostics if something stops working.
-
-The script uses **`set -e`** and internal checks to fail early when something is misconfigured. It also performs small automatic repairs (e.g., REALITY private key) when possible.
+Then:
+1. **Option 1**: Install Xray Core
+2. **Option 2**: Configure VLESS + REALITY
+3. **Option 30** (Optional): Optimize System for Maximum Performance
+4. **Option 8**: Enable auto-start
+5. **Option 5**: Start service
+6. Configure your VPS provider firewall (instructions provided)
+7. **Option 14**: Generate QR code for first client
 
 ---
 
-## Installation
+## Menu Options (32 Total)
 
-### Requirements
+### Installation & Setup (1-4)
+- 1) Install Xray Core
+- 2) Configure VLESS + REALITY
+- 3) Uninstall Xray
+- 4) Version Management (Install/Switch/Rollback) **NEW**
 
-- **OS:** A modern Debian/Ubuntu-like Linux distribution.
-- **Init system:** `systemd`.
-- **Network:** Public IPv4 with outbound internet access.
-- **Privileges:** Must be run as **root** (or via `sudo`).
+### Service Control (5-9)
+- 5) Start service
+- 6) Stop service
+- 7) Restart service
+- 8) Enable auto-start
+- 9) Disable auto-start
 
-### Dependencies
+### Client Management (10-16)
+- 10) Add new client (Wizard)
+- 11) Remove client
+- 12) List all clients
+- 13) Show client connection info
+- 14) Generate QR code
+- 15) Connection guides (Android/iOS/Desktop)
+- 16) Client traffic statistics
 
-The script relies on several common tools:
+### Logs & Monitoring (17-20)
+- 17) View logs
+- 18) Save logs to file
+- 19) Clear logs
+- 20) Detailed system status
 
-- `bash` — shell interpreter
-- `curl`, `wget` — downloading installer and performing network checks
-- `unzip` — unpacking Xray releases
-- `jq` — JSON parsing and manipulation
-- `qrencode` — generating QR codes for clients
-- `net-tools` or `iproute2` (`ss`, `netstat`) — checking ports
+### Configuration (21-23)
+- 21) Backup configuration
+- 22) Restore configuration
+- 23) View current config
 
-If any of these are missing, the **install flow** tries to install them via your package manager.
+### System & Advanced (24-28)
+- 24) Remove old VPN systems (WireGuard/Caddy/wstunnel)
+- 25) Admin help (component explanations)
+- 26) Run system diagnostics
+- 27) Check and fix private key
+- 28) DPI & Leak Security Test
 
-### Installing the Script
+### Performance & Mass Tools (29-32) **NEW**
+- 29) Server Benchmark & Recommendations
+- 30) Optimize System for Maximum Performance
+- 31) Mass Config Generator (Bulk + QR Codes)
+- 32) Mass Client Remover
 
-1. Place the script on your server, for example:
+---
 
-   ```bash
-   sudo mkdir -p /usr/local/bin/VPS_V2
-   sudo cp xray-manager.sh /usr/local/bin/VPS_V2/
-   sudo chmod +x /usr/local/bin/VPS_V2/xray-manager.sh
-   ```
+## Advanced Features
 
-2. Run it as root:
+### Version Management
 
-   ```bash
-   sudo /usr/local/bin/VPS_V2/xray-manager.sh
-   ```
+Switch between any Xray Core version:
 
-3. From the menu, choose:
-   - **Install Xray**
-   - Then **Configure VLESS + REALITY**
+```bash
+sudo ./xray-manager.sh switch-version 25.10.15
+```
 
-4. Follow the wizard prompts until configuration is complete.
+Or use the interactive menu (Option 4):
+- Install specific version
+- Automatic backup before switching
+- Rollback to previous version
+- All clients remain valid
 
-### Firewall / Cloud Provider Rules
+### Mass Config Generation
 
-After installation and configuration:
+Generate 1-1000 client configs in seconds:
+- Menu Option 31
+- Automatic naming (PREFIX_001, PREFIX_002, etc.)
+- PNG QR codes for each client
+- HTML visual gallery
+- Complete VLESS URL list
 
-- Allow **TCP** inbound on the chosen Xray port (commonly `443`).
-- Configure this both on:
-  - Your VPS provider firewall (e.g., Hetzner Cloud, OVH, etc.).
-  - Any local firewall tool you use (`ufw`, `iptables`, etc.).
+### System Optimization
+
+Enable BBR + network tuning + file descriptor limits:
+- Menu Option 30
+- 2-3x throughput improvement with BBR
+- 64MB network buffers for high-latency connections
+- 1M file descriptor support
+- 10-point verification checklist
+- Graceful reboot with countdown
+
+### Server Benchmarking
+
+Analyze your server capabilities:
+- Menu Option 29
+- CPU/Memory/Disk/Network analysis
+- Performance tier classification
+- Concurrent connection recommendations
+- Optimization status check
+
+---
+
+## File Structure
+
+After running the script, you'll have:
+
+```
+/usr/local/bin/xray-manager.sh          # Main script
+/usr/local/bin/xray                      # Xray binary
+/usr/local/etc/xray/
+├── config.json                          # Main Xray config
+├── clients.json                         # Client registry
+├── public_key.txt                       # REALITY public key
+├── sni.txt                              # SNI/server name
+├── port.txt                             # Listening port
+├── server_name.txt                      # Friendly hostname
+├── versions/                            # Version backups
+├── backups/                             # Config backups
+└── benchmark_results.json               # Performance data (NEW)
+
+/etc/systemd/system/xray.service                # Service unit
+/etc/systemd/system/xray.service.d/override.conf  # Limits override
+/etc/sysctl.d/99-xray-performance.conf           # Kernel tuning (NEW)
+/etc/security/limits.d/99-xray-performance.conf  # File limits (NEW)
+
+/var/log/xray/
+├── access.log                           # Connection log
+└── error.log                            # Error log
+```
 
 ---
 
 ## Configuration
 
-### Main Files
+### Main Configuration Files
 
-All key configuration is stored under `/usr/local/etc/xray`:
+**`/usr/local/etc/xray/config.json`**
+- VLESS + REALITY inbound configuration
+- Outbound routing rules
+- Logging configuration
 
-- `config.json`  
-  The **primary Xray configuration**. Important sections:
-  - `log` — log level and file paths.
-  - `inbounds` — VLESS + REALITY inbound:
-    - `port` — the listening port.
-    - `protocol` — `"vless"`.
-    - `settings.clients` — list of clients with `id`, `flow`, `email`.
-    - `streamSettings.security` — `"reality"`.
-    - `realitySettings` — `dest`, `serverNames`, `privateKey`, `shortIds`.
-  - `outbounds` — usually `freedom` and `blackhole`.
-  - `routing.rules` — simple rules (e.g., blocking BitTorrent).
+**`/usr/local/etc/xray/clients.json`**
+- Client registry (uuid, email, shortId, created, mass_generated)
+- Used by script for client management
 
-- `clients.json`  
-  A **client registry** used by the script. Each entry typically has:
-  - `uuid` — Xray client ID.
-  - `email` — label/username.
-  - `shortId` — REALITY short ID.
-  - `flow` — usually `xtls-rprx-vision`.
-  - `created` — timestamp.
+**Helper state files:**
+- `public_key.txt` — REALITY public key
+- `sni.txt` — SNI/server name
+- `port.txt` — Listening port
+- `server_name.txt` — Friendly name
 
-- Helper state files:
-  - `public_key.txt` — REALITY public key.
-  - `sni.txt` — SNI that clients should use.
-  - `port.txt` — port number.
-  - `server_name.txt` — descriptive name/hostname.
+### Performance Optimization (NEW)
 
-- Backups:
-  - `backups/config_backup_YYYYMMDD_HHMMSS.tar.gz` — archived configs.
+When you run Option 30, the script configures:
 
-### Systemd Unit
+**BBR Congestion Control**
+- `net.ipv4.tcp_congestion_control = bbr`
+- `net.core.default_qdisc = fq`
+- Expected: 2-3x throughput improvement
 
-The script writes `/etc/systemd/system/xray.service`, which typically:
+**Network Buffers**
+- `net.core.rmem_max = 67108864` (64MB)
+- `net.core.wmem_max = 67108864` (64MB)
+- Great for high-latency connections
 
-- Runs: `/usr/local/bin/xray run -config /usr/local/etc/xray/config.json`
-- Grants minimal required capabilities (`CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`).
-- Sets restart policy (`Restart=on-failure`) and resource limits.
+**File Descriptor Limits**
+- `fs.file-max = 2097152`
+- Supports 1M+ concurrent connections
 
-You normally don’t edit this by hand; instead, let the script manage it.
-
-### Interactive Configuration Wizard
-
-The configuration wizard:
-
-1. Reads any existing setup and backs it up when appropriate.
-2. Asks for minimal inputs:
-   - Listening port
-   - Destination/SNI to impersonate
-   - Optional custom server name/domain
-3. Automatically:
-   - Generates REALITY keys
-   - Generates a first client
-   - Writes `config.json` and `clients.json`
-   - Writes service unit and reloads systemd
-4. Prints a summary and next steps.
-
-If needed, you can re-run the wizard to adjust configuration. Existing files may be backed up before overwriting.
+**Systemd Limits**
+- `DefaultLimitNOFILE=1048576`
+- Service and per-user limits
 
 ---
 
-## Usage & Common Workflows
+## Common Workflows
 
-### Starting the Manager
+### Add a Single Client
 
-Run the interactive menu:
+1. Menu → Option 10 (Add new client)
+2. Enter label/email (or accept default)
+3. Script generates UUID + Short ID
+4. Get VLESS URL and QR code
 
-```bash
-sudo /usr/local/bin/VPS_V2/xray-manager.sh
-```
+### Bulk Generate 100 Clients
 
-Use the numeric choices shown on-screen to navigate.
+1. Menu → Option 31 (Mass Config Generator)
+2. Enter base name (e.g., "TRIAL")
+3. Enter count (100)
+4. Output: `~/xray_mass_TRIAL_TIMESTAMP/`
+   - `qrcodes/` — PNG QR codes
+   - `configs/` — Text config files
+   - `index.html` — Visual gallery
+   - `configs_list.txt` — All VLESS URLs
 
-### 1. First-Time Install & Setup
+### Remove 50 Clients Safely
 
-1. **Select** the option to install Xray.
-2. **Wait** for the installer to complete.
-3. **Select** the configuration wizard for VLESS + REALITY.
-4. **Provide** port and destination/SNI when prompted.
-5. **Confirm** the summary and let it create/update config and service.
-6. **Enable & start** the service via the menu.
-7. **Open firewall** on your provider and/or OS.
+1. Menu → Option 32 (Mass Client Remover)
+2. Choose removal method:
+   - By pattern: `TRIAL_*`
+   - By range: `TRIAL_001` to `TRIAL_050`
+   - Interactive: Pick from list
+3. Confirm deletion
+4. Done!
 
-### 2. Adding a New Client
+### Switch Xray Version
 
-From the main menu:
+1. Menu → Option 4 (Version Management)
+2. Option 1: Install/Switch Version
+3. Choose version (e.g., 25.10.15)
+4. Script:
+   - Backs up current version
+   - Downloads new version
+   - Preserves all clients
+   - Restarts service
 
-1. Choose **Add client**.
-2. Enter a label/email for the client (or accept defaults).
-3. The script:
-   - Generates UUID + short ID.
-   - Updates `config.json` and `clients.json`.
-   - Restarts/reloads Xray if needed.
-4. It prints or offers:
-   - The full VLESS URL.
-   - Option to show QR code.
+### Optimize System Performance
 
-You can then share the URL or QR code for client configuration.
-
-### 3. Listing / Inspecting / Removing Clients
-
-- **List clients**: menu option to see all known clients with UUID/email.
-- **Show client info**: select a specific client to see detailed connection info.
-- **Remove client**:
-  1. Choose the remove option.
-  2. Enter the client identifier.
-  3. Confirm the deletion.
-  4. The script updates both Xray config and clients DB.
-
-### 4. Generating QR Codes
-
-There’s a menu entry to **generate QR codes** for one of the clients:
-
-1. Select the client.
-2. The script shows:
-   - Human-readable connection details.
-   - The full VLESS URL.
-   - An ASCII QR code in the terminal.
-3. Optionally, it can save a PNG QR file in your home directory.
-
-### 5. Viewing Connection Guides
-
-Another menu item opens **platform-specific connection guides** for:
-
-- Android (e.g., v2rayNG)
-- iOS (e.g., Shadowrocket, V2Box)
-- Windows (e.g., v2rayN, Nekoray)
-- macOS (e.g., V2RayXS, Qv2ray)
-- Linux (using GUI clients or the Xray CLI)
-
-These guides explain how to import the VLESS URL or QR code you generated.
-
-### 6. Monitoring & Diagnostics
-
-- **Status dashboard**: shows service status, ports, connection count, resource usage.
-- **Client stats**: basic statistics derived from the access log, by client.
-- **System diagnostics**: performs a series of checks:
-  - Xray binary presence
-  - Config syntax and structure
-  - Systemd service status
-  - Open port checks
-  - REALITY configuration sanity
-  - Log file presence and errors
-
-There is also an advanced **DPI/security test** helper that runs more detailed checks related to REALITY and network behavior (some aspects may be environment-dependent).
-
-### 7. Service Management
-
-From the menu you can:
-
-- **Start / Stop / Restart** the Xray service.
-- **Enable / Disable** automatic start on boot.
-- **Check status** via wrapped `systemctl` calls.
+1. Menu → Option 30 (Optimize System)
+2. Review optimizations
+3. Script applies BBR + tuning + limits
+4. If reboot needed:
+   - 10-second countdown
+   - Press Ctrl+C to cancel
+   - SSH reconnects in ~30 seconds
 
 ---
 
-## Maintenance & Troubleshooting
+## Troubleshooting
 
-### Backups & Restore
+### Client Cannot Connect
+**Most common cause: Firewall!**
+1. Check VPS provider firewall (Hetzner, DigitalOcean, etc.)
+2. Verify local firewall: `ss -tlnp | grep xray`
+3. Run Option 26 (Diagnostics)
+4. Run Option 28 (DPI Test)
 
-- **Backups:**
-  - The script can create timestamped archives containing `config.json`, `clients.json`, and relevant helper files under `/usr/local/etc/xray/backups/`.
-- **Restore:**
-  - Choose a backup from the menu.
-  - Confirm overwrite.
-  - Restart Xray to apply the restored configuration.
+### Service Won't Start
+1. Run Option 26 (System Diagnostics)
+2. Check logs: `journalctl -u xray -n 50`
+3. Validate config: `xray -test -c /usr/local/etc/xray/config.json`
 
-### Logs
+### Slow Performance
+1. Run Option 29 (Server Benchmark)
+2. Run Option 30 (System Optimization)
+3. Check if BBR is active: `sysctl net.ipv4.tcp_congestion_control`
+4. Try different SNI destination
 
-- **View logs:**
-  - Tail or view Xray access/error logs.
-  - View recent systemd journal entries for `xray.service`.
-- **Save logs:**
-  - Export logs to an archive in your home directory for sharing or offline analysis.
-- **Clear logs:**
-  - Truncate Xray logs.
-  - Optionally vacuum related journal entries (irreversible, use with caution).
-
-### REALITY Key Repair
-
-A helper checks if the REALITY private key in `config.json` is missing or inconsistent and can:
-
-- Regenerate a valid key pair.
-- Update configuration files.
-- Restart Xray.
-
-Note: **Changing REALITY keys invalidates existing client configs**; regenerate URLs/QR codes afterwards.
-
-### Removing Legacy VPN Systems
-
-If you previously used other VPN tools on the same VPS, the script can help clean them up:
-
-- Detect and remove WireGuard (interfaces, configs, services).
-- Detect and remove Caddy (binary, service, configs).
-- Detect and remove wstunnel.
-- Optionally clean related firewall (`ufw`) rules.
-
-Run this **only if you are sure you no longer need** these older setups.
-
-### Uninstalling Xray
-
-The uninstall routine:
-
-1. Stops and disables the `xray` systemd service.
-2. Uses the official Xray install script to remove binaries and configs.
-3. Clears `/usr/local/etc/xray` and `/var/log/xray`.
-
-The `xray-manager.sh` script itself is left in place; delete it manually if desired.
-
-### Common Issues & Tips
-
-- **Service wont start**
-  - Use the menu option to view logs or run diagnostics.
-  - Check `journalctl -u xray -n 50` for specific errors.
-  - Validate config syntax with `xray -test -c /usr/local/etc/xray/config.json`.
-
-- **Client cannot connect**
-  - Ensure your VPS and local firewalls allow the chosen port.
-  - **Firewall is the most common culprit!** Make sure to:
-    - Configure your VPS provider firewall (Hetzner, DigitalOcean, etc.)
-    - Run the local firewall configuration (auto-applied by the script)
-    - Verify with: `ss -tlnp | grep xray`
-  - Confirm the client is using the **correct**:
-    - **IPv4 address** (not IPv6 - the script forces IPv4)
-    - Port
-    - UUID
-    - REALITY public key
-    - SNI / server name
-    - Short ID
-  - Run the built-in diagnostics for more hints.
-
-- **"io: read/write on closed pipe" error on client**
-  - This usually means the connection couldn't be established.
-  - Likely causes:
-    - VPS provider firewall not allowing the port (most common)
-    - IPv6 address being used instead of IPv4
-    - Port not actually listening (check: `ss -tlnp | grep 32145`)
-  - Solution: Verify firewall rules and use IPv4 in client config.
-
-- **Slow or unstable performance**
-  - Check CPU and memory usage.
-  - Try a different SNI/destination.
-  - Investigate possible ISP throttling or packet inspection.
-
-- **After changing keys/ports**
-  - Always re-export URLs/QR codes and update all clients.
+### After Switching Versions
+- Always regenerate QR codes (Option 14)
+- All clients remain valid
+- No reconfiguration needed
 
 ---
 
-## Limitations & Security Notes
+## Security Notes
 
-### Known Limitations
-
-- Designed and tested primarily for **Debian/Ubuntu with systemd**.
-- Assumes a **single inbound** REALITY-enabled VLESS configuration by default.
-- Provides **basic** statistics only (no full bandwidth accounting).
-- Depends on tools like `jq` and `qrencode`; behavior is degraded or unavailable without them.
-
-### Security Considerations
-
-- The script is usually run as **root**. Only trust scripts you have inspected.
-- Protect all sensitive files:
+- Script runs as **root** — only trust what you inspect
+- Protect sensitive files:
   - `config.json`
   - `clients.json`
-  - `public_key.txt` and REALITY keys
-- Be careful when sharing VLESS URLs and QR codes; they grant direct access to your proxy.
-- Rotate keys and clients periodically, and after any suspected compromise.
+  - `public_key.txt`
+- Don't share VLESS URLs publicly
+- Rotate clients/keys periodically
+- Backups are created automatically for major operations
 
 ---
 
-## Contributing & Customization
+## System Requirements
 
-This project is delivered as a single Bash script and is easy to customize:
+- **OS:** Debian/Ubuntu with systemd
+- **Network:** Public IPv4 address
+- **Tools:** bash, curl, wget, unzip, jq, qrencode, net-tools, bc
 
-- Add or adjust menu entries.
-- Extend diagnostics or logging behavior.
-- Integrate with your own automation (e.g., Ansible, cloud-init).
+The script installs missing dependencies automatically.
 
-Before making changes, its a good idea to **keep backups** of both:
+---
 
-- The script itself.
-- Your Xray configuration directory.
+## Changelog
+
+### Version 2.0 (February 2026)
+- ✨ Version Management (install/switch/rollback)
+- ✨ Mass Config Generator (1-1000 configs)
+- ✨ Mass Client Remover (pattern/range/interactive)
+- ✨ System Performance Optimization (BBR + tuning)
+- ✨ Server Benchmark & Recommendations
+- 🔧 Graceful reboot with countdown
+- 🔧 10-point verification checklist
+- 🐛 Fixed color escape sequences in menus
+
+### Version 1.0 (Initial Release)
+- Core: Install, Configure, Add/Remove clients
+- QR code generation, Service management
+- DPI security tests, Connection guides
+
+---
+
+## Support & Help
+
+1. Run **Option 26**: System Diagnostics
+2. Run **Option 28**: DPI & Security Test
+3. Save logs: **Option 18**
+4. Check `/var/log/xray/error.log`
+
+For detailed help, run: **Option 25** (Admin Help)
 
 ---
 
 ## License
 
-This repository currently does not include an explicit license file. If you plan to distribute modified versions, please add an appropriate license and attribution as needed.
-
+This project currently has no explicit license. Modify and distribute as needed, with appropriate attribution.
