@@ -74,7 +74,7 @@ It wraps Xray Core, systemd, and a small set of helper files into a cohesive "co
 ### Installation
 
 ```bash
-sudo bash <(curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh)
+curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh | sudo bash
 ```
 
 This single command will:
@@ -517,7 +517,7 @@ This project currently has no explicit license. Modify and distribute as needed,
 ### نصب (Installation)
 
 ```bash
-sudo bash <(curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh)
+curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh | sudo bash
 ```
 
 این دستور به صورت خودکار:
