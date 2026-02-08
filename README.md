@@ -74,15 +74,43 @@ It wraps Xray Core, systemd, and a small set of helper files into a cohesive "co
 ### Installation
 
 ```bash
-sudo mkdir -p /usr/local/bin
-sudo cp xray-manager.sh /usr/local/bin/
-sudo chmod +x /usr/local/bin/xray-manager.sh
+sudo bash <(curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh)
 ```
+
+This single command will:
+1. Download the script
+2. **Automatically install** it to `/usr/local/bin/xray-manager.sh`
+3. Launch the interactive menu automatically
+
+After installation, you can run it anytime with:
+```bash
+sudo xray-manager.sh
+```
+
+<details>
+<summary>Alternative: Manual Installation</summary>
+
+**Option A: Clone and run (auto-installs)**
+```bash
+git clone https://github.com/HaMeD1379/PhantomVLESS.git
+cd PhantomVLESS
+sudo bash xray-manager.sh
+```
+The script will automatically copy itself to `/usr/local/bin/` on first run.
+
+**Option B: Direct download**
+```bash
+sudo curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh -o /usr/local/bin/xray-manager.sh
+sudo chmod +x /usr/local/bin/xray-manager.sh
+sudo xray-manager.sh
+```
+</details>
 
 ### First-Time Setup
 
 ```bash
-sudo /usr/local/bin/xray-manager.sh
+sudo xray-manager.sh
+
 ```
 
 Then:
@@ -489,10 +517,30 @@ This project currently has no explicit license. Modify and distribute as needed,
 ### نصب (Installation)
 
 ```bash
-sudo mkdir -p /usr/local/bin
+sudo bash <(curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh)
+```
+
+این دستور به صورت خودکار:
+1. اسکریپت را دانلود می‌کند
+2. آن را در `/usr/local/bin/xray-manager.sh` نصب می‌کند
+3. منوی تعاملی را راه‌اندازی می‌کند
+
+بعد از نصب، می‌توانید هر زمان با این دستور اجرا کنید:
+```bash
+sudo xray-manager.sh
+```
+
+<details>
+<summary>روش جایگزین: نصب دستی</summary>
+
+```bash
+git clone https://github.com/HaMeD1379/PhantomVLESS.git
+cd PhantomVLESS
 sudo cp xray-manager.sh /usr/local/bin/
 sudo chmod +x /usr/local/bin/xray-manager.sh
+sudo xray-manager.sh
 ```
+</details>
 
 ### تنظیم اولیه (First-Time Setup)
 

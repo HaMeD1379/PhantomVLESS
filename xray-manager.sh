@@ -34,7 +34,7 @@ CLIENTS_DB="/usr/local/etc/xray/clients.json"
 print_color() {
     local color=$1
     shift
-    echo -e "${color}$@${NC}"
+    echo -e "${color}$*${NC}"
 }
 
 # Function to check if running as root
@@ -59,6 +59,93 @@ initialize_environment() {
 
     # Set proper permissions
     chmod 644 "$CLIENTS_DB" 2>/dev/null || true
+}
+
+# Script location constants
+SCRIPT_INSTALL_PATH="/usr/local/bin/xray-manager.sh"
+SCRIPT_GITHUB_URL="https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh"
+
+# Function to self-install the script
+self_install() {
+    local CURRENT_SCRIPT="$0"
+    local SCRIPT_SOURCE=""
+
+    # Check if already installed in the correct location
+    if [[ "$CURRENT_SCRIPT" == "$SCRIPT_INSTALL_PATH" ]]; then
+        return 0
+    fi
+
+    # Check if script is already installed
+    if [[ -f "$SCRIPT_INSTALL_PATH" ]]; then
+        # Script exists, check if we should update
+        local INSTALLED_HASH=$(md5sum "$SCRIPT_INSTALL_PATH" 2>/dev/null | awk '{print $1}')
+        local CURRENT_HASH=""
+
+        # If running from a real file, compare hashes
+        if [[ -f "$CURRENT_SCRIPT" ]]; then
+            CURRENT_HASH=$(md5sum "$CURRENT_SCRIPT" 2>/dev/null | awk '{print $1}')
+            if [[ "$INSTALLED_HASH" == "$CURRENT_HASH" ]]; then
+                return 0  # Same version, no action needed
+            fi
+        fi
+
+        # Running from pipe/curl - just use existing installation
+        if [[ "$CURRENT_SCRIPT" == "bash" ]] || [[ "$CURRENT_SCRIPT" == "/dev/fd/"* ]] || [[ "$CURRENT_SCRIPT" == "/proc/"* ]]; then
+            return 0
+        fi
+    fi
+
+    print_color $CYAN "┌─────────────────────────────────────────────────────────────┐"
+    print_color $CYAN "│           PhantomVLESS - Self Installation                  │"
+    print_color $CYAN "└─────────────────────────────────────────────────────────────┘"
+    echo
+
+    # Create target directory if needed
+    mkdir -p /usr/local/bin
+
+    # Determine source for installation
+    if [[ -f "$CURRENT_SCRIPT" ]] && [[ "$CURRENT_SCRIPT" != "bash" ]]; then
+        # Running from a local file - copy it
+        SCRIPT_SOURCE="$CURRENT_SCRIPT"
+        print_color $YELLOW "  ${ARROW} Installing from local file: $CURRENT_SCRIPT"
+
+        if cp "$SCRIPT_SOURCE" "$SCRIPT_INSTALL_PATH"; then
+            chmod +x "$SCRIPT_INSTALL_PATH"
+            print_color $GREEN "  ${CHECK} Script installed to: $SCRIPT_INSTALL_PATH"
+        else
+            print_color $RED "  ${CROSS} Failed to copy script to $SCRIPT_INSTALL_PATH"
+            return 1
+        fi
+    else
+        # Running from pipe (curl | bash) - download from GitHub
+        print_color $YELLOW "  ${ARROW} Downloading from GitHub..."
+
+        if curl -sL "$SCRIPT_GITHUB_URL" -o "$SCRIPT_INSTALL_PATH"; then
+            chmod +x "$SCRIPT_INSTALL_PATH"
+            print_color $GREEN "  ${CHECK} Script downloaded and installed to: $SCRIPT_INSTALL_PATH"
+        else
+            print_color $RED "  ${CROSS} Failed to download script from GitHub"
+            print_color $YELLOW "  URL: $SCRIPT_GITHUB_URL"
+            return 1
+        fi
+    fi
+
+    # Verify installation
+    if [[ -x "$SCRIPT_INSTALL_PATH" ]]; then
+        print_color $GREEN "  ${CHECK} Installation verified successfully"
+        echo
+        print_color $CYAN "  You can now run the script anytime with:"
+        print_color $BOLD "    sudo xray-manager.sh"
+        echo
+        print_color $YELLOW "  Starting the manager..."
+        echo
+        sleep 1
+    else
+        print_color $RED "  ${CROSS} Installation verification failed"
+        return 1
+    fi
+
+    return 0
 }
 
 # Function to get Xray Core status
@@ -162,10 +249,32 @@ get_resource_usage() {
     fi
 }
 
+# Function to display ASCII logo
+show_logo() {
+    echo -e "${BOLD}${YELLOW}"
+    echo '  ██████╗  ██╗  ██╗  █████╗  ███╗   ██╗ ████████╗  ██████╗  ███╗   ███╗'
+    echo '  ██╔══██╗ ██║  ██║ ██╔══██╗ ████╗  ██║ ╚══██╔══╝ ██╔═══██╗ ████╗ ████║'
+    echo '  ██████╔╝ ███████║ ███████║ ██╔██╗ ██║    ██║    ██║   ██║ ██╔████╔██║'
+    echo '  ██╔═══╝  ██╔══██║ ██╔══██║ ██║╚██╗██║    ██║    ██║   ██║ ██║╚██╔╝██║'
+    echo '  ██║      ██║  ██║ ██║  ██║ ██║ ╚████║    ██║    ╚██████╔╝ ██║ ╚═╝ ██║'
+    echo '  ╚═╝      ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝  ╚═══╝    ╚═╝     ╚═════╝  ╚═╝     ╚═╝'
+    echo ''
+    echo '            ██╗   ██╗ ██╗      ███████╗ ███████╗ ███████╗'
+    echo '             ██╗ ██╔╝ ██║      ██╔════╝ ██╔════╝ ██╔════╝'
+    echo '              ████╔╝  ██║      █████╗   ███████╗ ███████╗'
+    echo '               ██╔╝   ██║      ██╔══╝   ╚════██║ ╚════██║'
+    echo '               ██║    ███████╗ ███████╗ ███████║ ███████║'
+    echo '               ╚═╝    ╚══════╝ ╚══════╝ ╚══════╝ ╚══════╝'
+    echo -e "${NC}"
+}
+
 # Function to display status dashboard
 show_status_dashboard() {
     local TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
     local SEPARATOR=$(printf '═%.0s' $(seq 1 $TERM_WIDTH))
+
+    # Display logo
+    show_logo
 
     echo -e "${BOLD}${CYAN}${SEPARATOR}${NC}"
     echo -e "${BOLD}${GREEN}                 XRAY VLESS + REALITY STATUS DASHBOARD${NC}"
@@ -2927,6 +3036,18 @@ uninstall_xray() {
         rm -rf /usr/local/etc/xray
         rm -rf /var/log/xray
         print_color $GREEN "Xray uninstalled"
+
+        # Ask about removing the manager script
+        echo
+        read -p "Also remove the xray-manager.sh script from /usr/local/bin? (y/n): " remove_script
+        if [[ "$remove_script" == "y" ]]; then
+            if [[ -f "$SCRIPT_INSTALL_PATH" ]]; then
+                rm -f "$SCRIPT_INSTALL_PATH"
+                print_color $GREEN "Manager script removed from $SCRIPT_INSTALL_PATH"
+                print_color $YELLOW "To reinstall, run:"
+                print_color $CYAN "  sudo bash <(curl -sL $SCRIPT_GITHUB_URL)"
+            fi
+        fi
     fi
 }
 
@@ -5079,6 +5200,9 @@ show_menu() {
 main() {
     check_root
     initialize_environment
+
+    # Self-install on first run (when run via curl or from local file)
+    self_install
 
     if [[ $# -eq 0 ]]; then
         # Interactive mode
