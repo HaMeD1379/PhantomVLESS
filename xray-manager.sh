@@ -259,12 +259,12 @@ show_logo() {
     echo '  ██║      ██║  ██║ ██║  ██║ ██║ ╚████║    ██║    ╚██████╔╝ ██║ ╚═╝ ██║'
     echo '  ╚═╝      ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝  ╚═══╝    ╚═╝     ╚═════╝  ╚═╝     ╚═╝'
     echo ''
-    echo '            ██╗   ██╗ ██╗      ███████╗ ███████╗ ███████╗'
-    echo '             ██╗ ██╔╝ ██║      ██╔════╝ ██╔════╝ ██╔════╝'
-    echo '              ████╔╝  ██║      █████╗   ███████╗ ███████╗'
-    echo '               ██╔╝   ██║      ██╔══╝   ╚════██║ ╚════██║'
-    echo '               ██║    ███████╗ ███████╗ ███████║ ███████║'
-    echo '               ╚═╝    ╚══════╝ ╚══════╝ ╚══════╝ ╚══════╝'
+    echo '            ██╗    ██╗ ██╗      ███████╗ ███████╗ ███████╗'
+    echo '            ╚██╗  ██╔╝ ██║      ██╔════╝ ██╔════╝ ██╔════╝'
+    echo '             ╚██╗██╔╝  ██║      █████╗   ███████╗ ███████╗'
+    echo '              ╚███╔╝   ██║      ██╔══╝   ╚════██║ ╚════██║'
+    echo '               ╚██╝    ███████╗ ███████╗ ███████║ ███████║'
+    echo '                ╚═╝    ╚══════╝ ╚══════╝ ╚══════╝ ╚══════╝'
     echo -e "${NC}"
 }
 
@@ -2889,6 +2889,374 @@ add_client() {
     add_client_wizard
 }
 
+# Function to export clients for VPS migration
+export_clients() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║              EXPORT CLIENTS FOR VPS MIGRATION              ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    if [[ ! -f "$CLIENTS_DB" ]] || [[ $(jq '.clients | length' "$CLIENTS_DB" 2>/dev/null) -eq 0 ]]; then
+        print_color $YELLOW "  No clients found to export."
+        read -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    local CLIENT_COUNT=$(jq '.clients | length' "$CLIENTS_DB" 2>/dev/null)
+    print_color $GREEN "  Found $CLIENT_COUNT client(s) to export."
+    echo
+
+    print_color $CYAN "  This will export client NAMES only (not UUIDs)."
+    print_color $CYAN "  Fresh UUIDs will be generated when importing on the new VPS."
+    echo
+
+    # Create export file with only client names
+    local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    local EXPORT_FILE="${HOME}/xray_clients_export_${TIMESTAMP}.json"
+
+    # Export only names/emails
+    jq '{
+        export_info: {
+            exported_at: (now | strftime("%Y-%m-%d %H:%M:%S")),
+            source_note: "Client names only - UUIDs will be regenerated on import",
+            client_count: (.clients | length)
+        },
+        clients: [.clients[] | {name: .email, original_created: .created}]
+    }' "$CLIENTS_DB" > "$EXPORT_FILE"
+
+    if [[ -f "$EXPORT_FILE" ]]; then
+        print_color $GREEN "  ${CHECK} Clients exported successfully!"
+        echo
+        print_color $CYAN "  Export file: ${BOLD}$EXPORT_FILE${NC}"
+        echo
+        print_color $YELLOW "  To migrate to a new VPS:"
+        print_color $CYAN "    1. Copy this file to your new VPS"
+        print_color $CYAN "    2. Install and configure Xray on the new VPS"
+        print_color $CYAN "    3. Run: ${BOLD}xray-manager.sh import-clients${NC}"
+        print_color $CYAN "    4. Select the export file"
+        print_color $CYAN "    5. Generate new QR codes for your clients"
+        echo
+        print_color $YELLOW "  Note: New UUIDs will be generated, so clients need new QR codes."
+    else
+        print_color $RED "  ${CROSS} Failed to export clients!"
+    fi
+
+    echo
+    read -p "  Press Enter to continue..."
+}
+
+# Function to import clients from export file
+import_clients() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║              IMPORT CLIENTS FROM EXPORT FILE               ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    # Check if Xray is configured
+    if [[ ! -f "$XRAY_CONFIG" ]]; then
+        print_color $RED "  ${CROSS} Xray is not configured!"
+        print_color $YELLOW "  Please run option 2 first to configure VLESS + REALITY"
+        read -p "  Press Enter to return to menu..."
+        return 1
+    fi
+
+    # List available export files
+    print_color $BLUE "  Available export files in home directory:"
+    echo
+    local EXPORT_FILES=$(ls -1 ${HOME}/xray_clients_export_*.json 2>/dev/null)
+
+    if [[ -z "$EXPORT_FILES" ]]; then
+        print_color $YELLOW "  No export files found in ${HOME}/"
+        echo
+        print_color $CYAN "  You can also enter a full path to an export file."
+    else
+        echo "$EXPORT_FILES" | while read -r file; do
+            local COUNT=$(jq -r '.export_info.client_count // .clients | length' "$file" 2>/dev/null)
+            local DATE=$(jq -r '.export_info.exported_at // "Unknown"' "$file" 2>/dev/null)
+            print_color $CYAN "    ${BULLET} $(basename "$file")"
+            print_color $NC "      Clients: $COUNT | Exported: $DATE"
+        done
+    fi
+    echo
+
+    read -p "  Enter export filename or full path: " IMPORT_FILE
+
+    # Handle relative filename
+    if [[ ! "$IMPORT_FILE" =~ ^/ ]]; then
+        IMPORT_FILE="${HOME}/$IMPORT_FILE"
+    fi
+
+    if [[ ! -f "$IMPORT_FILE" ]]; then
+        print_color $RED "  ${CROSS} File not found: $IMPORT_FILE"
+        read -p "  Press Enter to return to menu..."
+        return 1
+    fi
+
+    # Validate JSON format
+    if ! jq empty "$IMPORT_FILE" 2>/dev/null; then
+        print_color $RED "  ${CROSS} Invalid JSON file!"
+        read -p "  Press Enter to return to menu..."
+        return 1
+    fi
+
+    # Get client names from export file
+    local CLIENT_NAMES=$(jq -r '.clients[].name' "$IMPORT_FILE" 2>/dev/null)
+    local IMPORT_COUNT=$(jq -r '.clients | length' "$IMPORT_FILE" 2>/dev/null)
+
+    if [[ -z "$CLIENT_NAMES" ]] || [[ "$IMPORT_COUNT" -eq 0 ]]; then
+        print_color $RED "  ${CROSS} No clients found in export file!"
+        read -p "  Press Enter to return to menu..."
+        return 1
+    fi
+
+    print_color $GREEN "  Found $IMPORT_COUNT client(s) to import:"
+    echo
+    echo "$CLIENT_NAMES" | head -10 | while read -r name; do
+        print_color $CYAN "    ${BULLET} $name"
+    done
+    if [[ $IMPORT_COUNT -gt 10 ]]; then
+        print_color $YELLOW "    ... and $((IMPORT_COUNT - 10)) more"
+    fi
+    echo
+
+    print_color $YELLOW "  ${ARROW} Fresh UUIDs will be generated for each client."
+    print_color $YELLOW "  ${ARROW} Existing clients with same name will be SKIPPED."
+    echo
+
+    read -p "  Proceed with import? (y/n): " CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        print_color $YELLOW "  Import cancelled."
+        return
+    fi
+
+    echo
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "IMPORTING CLIENTS..."
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    local IMPORTED=0
+    local SKIPPED=0
+
+    while IFS= read -r CLIENT_NAME; do
+        # Check if client already exists
+        if jq -e --arg name "$CLIENT_NAME" '.clients[] | select(.email == $name)' "$CLIENTS_DB" &>/dev/null; then
+            print_color $YELLOW "  ${BULLET} Skipped (exists): $CLIENT_NAME"
+            SKIPPED=$((SKIPPED + 1))
+            continue
+        fi
+
+        # Generate fresh UUID and Short ID
+        local UUID=$(generate_uuid)
+        local SHORT_ID=$(generate_short_id)
+        local TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+
+        # Add to Xray config
+        jq --arg uuid "$UUID" --arg email "$CLIENT_NAME" \
+           '.inbounds[0].settings.clients += [{"id": $uuid, "flow": "xtls-rprx-vision", "email": $email}]' \
+           "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+        # Add short ID to config
+        jq --arg shortid "$SHORT_ID" \
+           '.inbounds[0].streamSettings.realitySettings.shortIds += [$shortid]' \
+           "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+        # Add to clients database
+        jq --arg uuid "$UUID" --arg email "$CLIENT_NAME" --arg shortid "$SHORT_ID" --arg timestamp "$TIMESTAMP" \
+           '.clients += [{"uuid": $uuid, "email": $email, "shortId": $shortid, "flow": "xtls-rprx-vision", "created": $timestamp, "imported": true}]' \
+           "$CLIENTS_DB" > "${CLIENTS_DB}.tmp" && mv "${CLIENTS_DB}.tmp" "$CLIENTS_DB"
+
+        print_color $GREEN "  ${CHECK} Imported: $CLIENT_NAME"
+        IMPORTED=$((IMPORTED + 1))
+    done <<< "$CLIENT_NAMES"
+
+    echo
+    print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $GREEN "  ${CHECK} Import complete!"
+    print_color $CYAN "    Imported: $IMPORTED"
+    print_color $YELLOW "    Skipped:  $SKIPPED"
+    echo
+
+    # Restart service
+    if [[ $IMPORTED -gt 0 ]]; then
+        print_color $YELLOW "  Restarting Xray service..."
+        systemctl restart xray
+        print_color $GREEN "  ${CHECK} Service restarted"
+        echo
+        print_color $CYAN "  ${ARROW} Run option 35 to generate QR codes for all clients"
+    fi
+
+    echo
+    read -p "  Press Enter to continue..."
+}
+
+# Function to generate QR codes for ALL existing clients
+generate_all_qr_codes() {
+    clear
+    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
+    print_color $BOLD$CYAN "║          GENERATE QR CODES FOR ALL CLIENTS                 ║"
+    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
+    echo
+
+    # Check prerequisites
+    if [[ ! -f "$XRAY_CONFIG" ]]; then
+        print_color $RED "  ${CROSS} Xray is not configured!"
+        print_color $YELLOW "  Please run option 2 first to configure VLESS + REALITY"
+        read -p "  Press Enter to return to menu..."
+        return 1
+    fi
+
+    # Check for qrencode
+    if ! command -v qrencode &> /dev/null; then
+        print_color $YELLOW "  ${BULLET} Installing qrencode..."
+        apt-get update && apt-get install -y qrencode
+    fi
+
+    # Check clients
+    if [[ ! -f "$CLIENTS_DB" ]] || [[ $(jq '.clients | length' "$CLIENTS_DB" 2>/dev/null) -eq 0 ]]; then
+        print_color $YELLOW "  No clients found. Please add clients first."
+        read -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    local CLIENT_COUNT=$(jq '.clients | length' "$CLIENTS_DB" 2>/dev/null)
+    print_color $GREEN "  Found $CLIENT_COUNT client(s)"
+    echo
+
+    # Get server config
+    local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
+    local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
+    local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "443")
+    local SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
+
+    print_color $CYAN "  Server: ${SERVER_IP}:${PORT}"
+    print_color $CYAN "  SNI: ${SNI}"
+    echo
+
+    read -p "  Generate QR codes for all $CLIENT_COUNT clients? (y/n): " CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        print_color $YELLOW "  Cancelled."
+        return
+    fi
+
+    echo
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $BOLD$GREEN "GENERATING QR CODES..."
+    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    # Create output directory
+    local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    local OUTPUT_DIR="${HOME}/xray_qr_all_${TIMESTAMP}"
+    mkdir -p "$OUTPUT_DIR"
+
+    # Create HTML index
+    local INDEX_FILE="${OUTPUT_DIR}/index.html"
+    cat > "$INDEX_FILE" << EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xray Client QR Codes</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
+        h1 { color: #00d4ff; text-align: center; }
+        .info { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }
+        .card { background: #0f3460; border-radius: 8px; padding: 15px; text-align: center; }
+        .card img { max-width: 220px; border-radius: 4px; background: white; padding: 10px; }
+        .card h3 { color: #00d4ff; margin: 10px 0 5px; word-break: break-all; }
+        .card .info-text { font-size: 11px; color: #888; }
+        .download-all { background: #00d4ff; color: #000; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; margin: 10px; }
+    </style>
+</head>
+<body>
+    <h1>🔐 Xray Client QR Codes</h1>
+    <div class="info">
+        <strong>Server:</strong> ${SERVER_IP}:${PORT} |
+        <strong>Protocol:</strong> VLESS + REALITY |
+        <strong>SNI:</strong> ${SNI} |
+        <strong>Generated:</strong> $(date)
+        <br><br>
+        <strong>Total Clients:</strong> ${CLIENT_COUNT}
+    </div>
+    <div class="grid">
+EOF
+
+    local GENERATED=0
+
+    # Process each client
+    jq -c '.clients[]' "$CLIENTS_DB" | while read -r client; do
+        local UUID=$(echo "$client" | jq -r '.uuid')
+        local EMAIL=$(echo "$client" | jq -r '.email')
+        local SHORT_ID=$(echo "$client" | jq -r '.shortId')
+
+        # Sanitize filename (remove special chars)
+        local SAFE_NAME=$(echo "$EMAIL" | tr -cd '[:alnum:]_-')
+
+        # URL encode client name
+        local ENCODED_NAME=$(echo -n "$EMAIL" | jq -sRr @uri 2>/dev/null || echo "$EMAIL")
+
+        # Generate VLESS URL
+        local VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${ENCODED_NAME}"
+
+        # Generate QR code PNG - filename matches client name
+        local QR_FILE="${OUTPUT_DIR}/${SAFE_NAME}.png"
+        qrencode -t PNG -o "$QR_FILE" -s 6 -m 2 "$VLESS_URL" 2>/dev/null
+
+        if [[ -f "$QR_FILE" ]]; then
+            print_color $GREEN "  ${CHECK} ${EMAIL}"
+
+            # Add to HTML index
+            cat >> "$INDEX_FILE" << EOF
+        <div class="card">
+            <img src="${SAFE_NAME}.png" alt="${EMAIL}">
+            <h3>${EMAIL}</h3>
+            <div class="info-text">Click image to view full size</div>
+        </div>
+EOF
+            GENERATED=$((GENERATED + 1))
+        else
+            print_color $RED "  ${CROSS} Failed: ${EMAIL}"
+        fi
+    done
+
+    # Close HTML
+    cat >> "$INDEX_FILE" << EOF
+    </div>
+    <div class="info" style="margin-top: 20px;">
+        <p>📱 Scan QR codes with v2rayNG (Android) or Shadowrocket (iOS)</p>
+        <p>Each PNG file is named after the client for easy distribution</p>
+    </div>
+</body>
+</html>
+EOF
+
+    echo
+    print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_color $GREEN "  ${CHECK} QR code generation complete!"
+    echo
+    print_color $CYAN "  Output directory: ${BOLD}$OUTPUT_DIR${NC}"
+    echo
+    print_color $YELLOW "  Files created:"
+    print_color $CYAN "    ${BULLET} index.html - Visual gallery of all QR codes"
+    print_color $CYAN "    ${BULLET} {client_name}.png - Individual QR code files"
+    echo
+    print_color $CYAN "  Each PNG file is named after the client, making it easy"
+    print_color $CYAN "  to send the correct QR code to each person."
+    echo
+
+    # Show file count
+    local FILE_COUNT=$(ls -1 "$OUTPUT_DIR"/*.png 2>/dev/null | wc -l)
+    print_color $GREEN "  Total QR codes generated: $FILE_COUNT"
+    echo
+
+    read -p "  Press Enter to continue..."
+}
+
 # Function to enable service
 enable_service() {
     check_root
@@ -5180,7 +5548,7 @@ show_menu() {
     echo "    25) Admin help (component explanations)"
     echo "    26) Run system diagnostics"
     echo "    27) Check and fix private key"
-    echo "    28) DPI & Leak Security Test ${GREEN}★${NC}"
+    echo -e "    28) DPI & Leak Security Test ${GREEN}★${NC}"
     echo
 
     print_color $CYAN "  ${BOLD}Performance & Mass Tools${NC} ${MAGENTA}★${NC}"
@@ -5188,6 +5556,12 @@ show_menu() {
     echo "    30) Optimize System for Maximum Performance"
     echo "    31) Mass Config Generator (Bulk + QR Codes)"
     echo "    32) Mass Client Remover"
+    echo
+
+    print_color $CYAN "  ${BOLD}Migration & Export${NC} ${YELLOW}★${NC}"
+    echo "    33) Export clients (for VPS migration)"
+    echo "    34) Import clients (from export file)"
+    echo "    35) Generate QR codes for ALL clients"
     echo
 
     print_color $BOLD$BLUE "└─────────────────────────────────────────────────────────────┘"
@@ -5244,6 +5618,9 @@ main() {
                 30) optimize_system_performance ;;
                 31) mass_config_generator ;;
                 32) mass_remove_clients ;;
+                33) export_clients ;;
+                34) import_clients ;;
+                35) generate_all_qr_codes ;;
                 0) exit 0 ;;
                 *) print_color $RED "Invalid choice" ;;
             esac
@@ -5285,6 +5662,9 @@ main() {
             optimize|perf) optimize_system_performance ;;
             mass-generate|mass|bulk) mass_config_generator ;;
             mass-remove) mass_remove_clients ;;
+            export-clients|export) export_clients ;;
+            import-clients|import) import_clients ;;
+            qr-all|generate-all-qr) generate_all_qr_codes ;;
             version)
                 local VER=$(get_installed_version)
                 if [[ "$VER" != "not-installed" ]]; then
@@ -5351,6 +5731,11 @@ main() {
                 echo "  optimize         - Optimize system for maximum performance"
                 echo "  mass-generate    - Generate multiple configs with QR codes"
                 echo "  mass-remove      - Mass remove clients (pattern/range/all)"
+                echo
+                print_color $CYAN "Migration & Export:"
+                echo "  export-clients   - Export client names for VPS migration"
+                echo "  import-clients   - Import clients from export file"
+                echo "  qr-all           - Generate QR codes for ALL existing clients"
                 echo
                 print_color $CYAN "Version management:"
                 echo "  version          - Show current Xray version"
