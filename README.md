@@ -33,7 +33,7 @@ It wraps Xray Core, systemd, and a small set of helper files into a cohesive "co
 - **Auto-apply firewall rules** (UFW, iptables, firewalld)
 - **IPv4 prioritization** to prevent IPv6-only issues
 - **Comprehensive firewall guide** for 7 major VPS providers
-- Intuitive **TUI menu** with 32 numbered actions
+- Intuitive **TUI menu** with 35 numbered actions
 
 #### Client Management ✨
 - **Client management** (add/list/remove) with automatic UUID & short ID generation
@@ -58,6 +58,12 @@ It wraps Xray Core, systemd, and a small set of helper files into a cohesive "co
 - **Mass Config Generator**: Create 1-1000 configs with QR codes
 - **HTML visual gallery** for client organization
 - **Complete configs list** with VLESS URLs
+
+#### Migration & Export (NEW ✨)
+- **Export clients** for seamless VPS migration
+- **Import clients** from export file with fresh UUID generation
+- **Batch QR code generation** for all existing clients
+- **HTML gallery output** with all client QR codes
 
 #### System Management ✨
 - **Server Benchmark** (CPU, memory, disk, network analysis)
@@ -124,7 +130,7 @@ Then:
 
 ---
 
-## Menu Options (32 Total)
+## Menu Options (35 Total)
 
 ### Installation & Setup (1-4)
 - 1) Install Xray Core
@@ -175,6 +181,11 @@ Then:
 - 31) Mass Config Generator (Bulk + QR Codes)
 - 32) Mass Client Remover
 
+### Migration & Export (33-35) **NEW**
+- 33) Export clients (for VPS migration)
+- 34) Import clients (from export file)
+- 35) Generate QR codes for ALL clients
+
 ---
 
 ## Advanced Features
@@ -220,6 +231,14 @@ Analyze your server capabilities:
 - Performance tier classification
 - Concurrent connection recommendations
 - Optimization status check
+
+### VPS Migration
+
+Seamlessly migrate clients to a new VPS:
+- Menu Option 33: Export clients (names only, portable format)
+- Menu Option 34: Import clients (fresh UUIDs generated)
+- Menu Option 35: Generate QR codes for all imported clients
+- HTML gallery with all QR codes for easy distribution
 
 ---
 
@@ -349,6 +368,28 @@ When you run Option 30, the script configures:
    - Press Ctrl+C to cancel
    - SSH reconnects in ~30 seconds
 
+### Migrate Clients to New VPS
+
+**On old VPS:**
+1. Menu → Option 33 (Export clients)
+2. Copy the export file (e.g., `~/xray_clients_export_TIMESTAMP.json`)
+
+**On new VPS:**
+1. Install and configure Xray (Options 1 & 2)
+2. Copy export file to new VPS
+3. Menu → Option 34 (Import clients)
+4. Select the export file
+5. Menu → Option 35 (Generate QR codes for ALL clients)
+6. Share new QR codes with your clients
+
+### Generate QR Codes for All Clients
+
+1. Menu → Option 35 (Generate QR codes for ALL clients)
+2. Confirm the operation
+3. Output: `~/xray_qr_all_TIMESTAMP/`
+   - Individual PNG QR codes
+   - `index.html` — Visual gallery with all clients
+
 ---
 
 ## Troubleshooting
@@ -402,6 +443,13 @@ The script installs missing dependencies automatically.
 ---
 
 ## Changelog
+
+### Version 2.1 (February 2026)
+- ✨ VPS Migration: Export clients for seamless server migration
+- ✨ VPS Migration: Import clients with automatic UUID generation
+- ✨ Batch QR Code Generator for all existing clients
+- ✨ HTML gallery output for bulk QR code distribution
+- 🔧 Menu expanded to 35 options
 
 ### Version 2.0 (February 2026)
 - ✨ Version Management (install/switch/rollback)
@@ -476,7 +524,7 @@ This project currently has no explicit license. Modify and distribute as needed,
 - **اعمال خودکار قوانین فایروال** (UFW, iptables, firewalld)
 - **اولویت‌بندی IPv4** برای جلوگیری از مشکلات IPv6-only
 - **راهنمای جامع فایروال** برای 7 ارائه دهنده محبوب VPS
-- **منوی متنی (TUI)** بصری با 32 عملکرد شماره‌گذاری شده
+- **منوی متنی (TUI)** بصری با 35 عملکرد شماره‌گذاری شده
 
 #### مدیریت کلاینت ✨
 - **مدیریت کلاینت** (افزودن/لیست/حذف) با تولید خودکار UUID و Short ID
@@ -501,6 +549,12 @@ This project currently has no explicit license. Modify and distribute as needed,
 - **تولید کننده کانفیگ انبوه**: ایجاد 1 تا 1000 کانفیگ با کدهای QR
 - **گالری تصویری HTML** برای سازماندهی کلاینت‌ها
 - **لیست کامل کانفیگ‌ها** با لینک‌های VLESS
+
+#### انتقال و صادرات (جدید ✨)
+- **صادرات کلاینت‌ها** برای انتقال بدون دردسر به VPS جدید
+- **وارد کردن کلاینت‌ها** از فایل صادراتی با تولید خودکار UUID جدید
+- **تولید انبوه کد QR** برای همه کلاینت‌های موجود
+- **خروجی گالری HTML** با همه کدهای QR کلاینت‌ها
 
 #### مدیریت سیستم ✨
 - **بنچمارک سرور** (تحلیل CPU، حافظه، دیسک، شبکه)
@@ -610,6 +664,11 @@ sudo /usr/local/bin/xray-manager.sh
 - 31) تولید کننده کانفیگ انبوه (انبوه + کدهای QR)
 - 32) حذف کننده انبوه کلاینت
 
+### انتقال و صادرات (33-35) **جدید**
+- 33) صادرات کلاینت‌ها (برای انتقال VPS)
+- 34) وارد کردن کلاینت‌ها (از فایل صادراتی)
+- 35) تولید کد QR برای همه کلاینت‌ها
+
 ---
 
 ## ویژگی‌های پیشرفته
@@ -655,6 +714,14 @@ sudo ./xray-manager.sh switch-version 25.10.15
 - طبقه‌بندی سطح عملکرد
 - توصیه‌های اتصال همزمان
 - بررسی وضعیت بهینه‌سازی
+
+### انتقال VPS
+
+انتقال بدون دردسر کلاینت‌ها به VPS جدید:
+- گزینه منو 33: صادرات کلاینت‌ها (فقط نام‌ها، فرمت قابل حمل)
+- گزینه منو 34: وارد کردن کلاینت‌ها (UUID‌های جدید تولید می‌شوند)
+- گزینه منو 35: تولید کد QR برای همه کلاینت‌های وارد شده
+- گالری HTML با همه کدهای QR برای توزیع آسان
 
 ---
 
@@ -837,6 +904,13 @@ sudo ./xray-manager.sh switch-version 25.10.15
 ---
 
 ## تغییرات (Changelog)
+
+### نسخه 2.1 (فوریه 2026)
+- ✨ انتقال VPS: صادرات کلاینت‌ها برای انتقال بدون دردسر سرور
+- ✨ انتقال VPS: وارد کردن کلاینت‌ها با تولید خودکار UUID
+- ✨ تولید کننده انبوه کد QR برای همه کلاینت‌های موجود
+- ✨ خروجی گالری HTML برای توزیع انبوه کد QR
+- 🔧 منو به 35 گزینه گسترش یافت
 
 ### نسخه 2.0 (فوریه 2026)
 - ✨ مدیریت نسخه (نصب/تغییر/بازگشت)
