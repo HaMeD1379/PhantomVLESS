@@ -29,6 +29,7 @@ XRAY_LOG="/var/log/xray/access.log"
 XRAY_ERROR_LOG="/var/log/xray/error.log"
 CONFIG_BACKUP_DIR="/usr/local/etc/xray/backups"
 CLIENTS_DB="/usr/local/etc/xray/clients.json"
+XRAY_PUBLIC_KEY_FILE="/usr/local/etc/xray/public_key.txt"
 
 # Function to print colored output
 print_color() {
@@ -59,6 +60,14 @@ initialize_environment() {
 
     # Set proper permissions
     chmod 644 "$CLIENTS_DB" 2>/dev/null || true
+
+    # Keep exported client URLs aligned with the existing REALITY private key.
+    # This only repairs derived metadata; it never rotates keys or client IDs.
+    if [[ -f "$XRAY_CONFIG" && -x "$XRAY_BIN" ]] && command -v jq >/dev/null 2>&1; then
+        if ! get_reality_public_key >/dev/null 2>&1; then
+            print_color $YELLOW "${CROSS} Could not verify the cached REALITY client key"
+        fi
+    fi
 }
 
 # Script location constants
@@ -983,6 +992,71 @@ generate_short_id() {
 }
 
 # Function to generate private key for REALITY
+extract_x25519_private_key() {
+    awk -F': *' '
+        $1 == "PrivateKey" || $1 == "Private key" { print $2; exit }
+    '
+}
+
+extract_x25519_public_key() {
+    awk -F': *' '
+        $1 == "Password (PublicKey)" || $1 == "Password" ||
+        $1 == "PublicKey" || $1 == "Public key" { print $2; exit }
+    '
+}
+
+is_valid_reality_x25519_key() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9_-]{43}$ ]]
+}
+
+derive_reality_public_key() {
+    local PRIVATE_KEY=${1:-}
+    local OUTPUT
+    local PUBLIC_KEY
+
+    is_valid_reality_x25519_key "$PRIVATE_KEY" || return 1
+    [[ -x "$XRAY_BIN" ]] || return 1
+
+    OUTPUT=$("$XRAY_BIN" x25519 -i "$PRIVATE_KEY" 2>/dev/null) || return 1
+    PUBLIC_KEY=$(extract_x25519_public_key <<< "$OUTPUT")
+    is_valid_reality_x25519_key "$PUBLIC_KEY" || return 1
+    printf '%s\n' "$PUBLIC_KEY"
+}
+
+# Always derive the client password/public key from the unchanged private key.
+# This prevents stale helper files and handles Xray 26.3.27+'s new
+# "Password (PublicKey)" output label.
+get_reality_public_key() {
+    local PRIVATE_KEY
+    local PUBLIC_KEY
+    local CACHED_KEY=""
+    local TEMP_KEY_FILE
+
+    [[ -f "$XRAY_CONFIG" ]] || return 1
+    PRIVATE_KEY=$(jq -r '
+        first(
+            .inbounds[]? |
+            select(.streamSettings.security == "reality") |
+            .streamSettings.realitySettings.privateKey
+        ) // empty
+    ' "$XRAY_CONFIG" 2>/dev/null)
+    PUBLIC_KEY=$(derive_reality_public_key "$PRIVATE_KEY") || return 1
+
+    if [[ -f "$XRAY_PUBLIC_KEY_FILE" ]]; then
+        CACHED_KEY=$(tr -d '\r\n' < "$XRAY_PUBLIC_KEY_FILE")
+    fi
+
+    if [[ "$CACHED_KEY" != "$PUBLIC_KEY" ]]; then
+        TEMP_KEY_FILE=$(mktemp "/usr/local/etc/xray/.public-key.XXXXXX")
+        printf '%s\n' "$PUBLIC_KEY" > "$TEMP_KEY_FILE"
+        chmod 600 "$TEMP_KEY_FILE"
+        chown root:root "$TEMP_KEY_FILE"
+        mv -f "$TEMP_KEY_FILE" "$XRAY_PUBLIC_KEY_FILE"
+    fi
+
+    printf '%s\n' "$PUBLIC_KEY"
+}
+
 generate_reality_keys() {
     local OUTPUT=""
     local PRIVATE_KEY=""
@@ -991,19 +1065,11 @@ generate_reality_keys() {
     # Try xray binary first
     if [[ -x "$XRAY_BIN" ]]; then
         OUTPUT=$("$XRAY_BIN" x25519 2>/dev/null)
-        # Handle new format: PrivateKey/Password (Xray 1.8+)
-        if echo "$OUTPUT" | grep -q "PrivateKey:"; then
-            PRIVATE_KEY=$(echo "$OUTPUT" | grep "PrivateKey:" | awk '{print $2}')
-            PUBLIC_KEY=$(echo "$OUTPUT" | grep "Password:" | awk '{print $2}')
-            if [[ -n "$PRIVATE_KEY" ]] && [[ -n "$PUBLIC_KEY" ]]; then
-                echo "Private key: $PRIVATE_KEY"
-                echo "Public key: $PUBLIC_KEY"
-                return 0
-            fi
-        fi
-        # Handle old format: Private key/Public key
-        if echo "$OUTPUT" | grep -q "Private key:"; then
-            echo "$OUTPUT"
+        PRIVATE_KEY=$(extract_x25519_private_key <<< "$OUTPUT")
+        PUBLIC_KEY=$(extract_x25519_public_key <<< "$OUTPUT")
+        if is_valid_reality_x25519_key "$PRIVATE_KEY" && is_valid_reality_x25519_key "$PUBLIC_KEY"; then
+            printf 'Private key: %s\n' "$PRIVATE_KEY"
+            printf 'Public key: %s\n' "$PUBLIC_KEY"
             return 0
         fi
     fi
@@ -1011,31 +1077,13 @@ generate_reality_keys() {
     # Fallback: try xray in PATH
     if command -v xray &> /dev/null; then
         OUTPUT=$(xray x25519 2>/dev/null)
-        # Handle new format
-        if echo "$OUTPUT" | grep -q "PrivateKey:"; then
-            PRIVATE_KEY=$(echo "$OUTPUT" | grep "PrivateKey:" | awk '{print $2}')
-            PUBLIC_KEY=$(echo "$OUTPUT" | grep "Password:" | awk '{print $2}')
-            if [[ -n "$PRIVATE_KEY" ]] && [[ -n "$PUBLIC_KEY" ]]; then
-                echo "Private key: $PRIVATE_KEY"
-                echo "Public key: $PUBLIC_KEY"
-                return 0
-            fi
-        fi
-        # Handle old format
-        if echo "$OUTPUT" | grep -q "Private key:"; then
-            echo "$OUTPUT"
+        PRIVATE_KEY=$(extract_x25519_private_key <<< "$OUTPUT")
+        PUBLIC_KEY=$(extract_x25519_public_key <<< "$OUTPUT")
+        if is_valid_reality_x25519_key "$PRIVATE_KEY" && is_valid_reality_x25519_key "$PUBLIC_KEY"; then
+            printf 'Private key: %s\n' "$PRIVATE_KEY"
+            printf 'Public key: %s\n' "$PUBLIC_KEY"
             return 0
         fi
-    fi
-
-    # Fallback: generate using openssl (x25519 compatible format)
-    local RAND_PRIV=$(openssl rand -base64 32 2>/dev/null | tr '+/' '-_' | tr -d '=\n' | cut -c1-43)
-    local RAND_PUB=$(openssl rand -base64 32 2>/dev/null | tr '+/' '-_' | tr -d '=\n' | cut -c1-43)
-
-    if [[ -n "$RAND_PRIV" ]] && [[ -n "$RAND_PUB" ]] && [[ ${#RAND_PRIV} -ge 40 ]]; then
-        echo "Private key: $RAND_PRIV"
-        echo "Public key: $RAND_PUB"
-        return 0
     fi
 
     return 1
@@ -1753,7 +1801,8 @@ EOF
        "$CLIENTS_DB" > "${CLIENTS_DB}.tmp" && mv "${CLIENTS_DB}.tmp" "$CLIENTS_DB"
 
     # Save public key for client generation
-    echo "$PUBLIC_KEY" > /usr/local/etc/xray/public_key.txt
+    printf '%s\n' "$PUBLIC_KEY" > "$XRAY_PUBLIC_KEY_FILE"
+    chmod 600 "$XRAY_PUBLIC_KEY_FILE"
     echo "$SNI" > /usr/local/etc/xray/sni.txt
     echo "$PORT" > /usr/local/etc/xray/port.txt
     echo "$SERVER_NAME" > /usr/local/etc/xray/server_name.txt
@@ -1888,21 +1937,17 @@ check_and_fix_private_key() {
             print_color $GREEN "  ${CHECK} Private key found: ${PRIVATE_KEY:0:20}..."
         fi
 
-        PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "")
+        PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "")
         if [[ -z "$PUBLIC_KEY" ]]; then
             if [[ "$INTERACTIVE" == "true" ]]; then
-                print_color $YELLOW "  ${CROSS} Public key file is missing!"
+                print_color $RED "  ${CROSS} Could not derive the public key from the existing private key"
+                print_color $YELLOW "  No key or client configuration was changed"
                 echo
-                print_color $YELLOW "  Do you want to regenerate the key pair?"
-                print_color $RED "  Warning: This will invalidate all existing client connections!"
-                read -p "  Regenerate keys? (y/n): " REGEN
-                if [[ "$REGEN" == "y" || "$REGEN" == "Y" ]]; then
-                    NEED_FIX=true
-                fi
+                read -p "  Press Enter to return to menu..."
             else
-                print_color $YELLOW "⚠ Public key file missing, regenerating from private key..."
-                NEED_FIX=true
+                print_color $RED "${CROSS} Could not derive the REALITY public key; no keys were changed"
             fi
+            return 1
         else
             if [[ "$INTERACTIVE" == "true" ]]; then
                 print_color $GREEN "  ${CHECK} Public key found: ${PUBLIC_KEY:0:20}..."
@@ -1924,26 +1969,12 @@ check_and_fix_private_key() {
 
         if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
             print_color $RED "  ${CROSS} Failed to generate keys!"
-            print_color $YELLOW "  Attempting automatic fix..."
-
-            # Try reinstalling xray
-            print_color $CYAN "  Reinstalling Xray binary..."
-            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install &>/dev/null
-
-            # Try again
-            KEYS=$(generate_reality_keys)
-            PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
-            PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
-
-            if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
-                print_color $RED "  ${CROSS} Still cannot generate keys!"
-                print_color $YELLOW "  Try running: bash -c \"\$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install"
-                if [[ "$INTERACTIVE" == "true" ]]; then
-                    echo
-                    read -p "  Press Enter to return to menu..."
-                fi
-                return 1
+            print_color $YELLOW "  No key, UUID, short ID, or client configuration was changed"
+            if [[ "$INTERACTIVE" == "true" ]]; then
+                echo
+                read -p "  Press Enter to return to menu..."
             fi
+            return 1
         fi
 
         # Backup current config
@@ -1959,7 +1990,8 @@ check_and_fix_private_key() {
         jq --arg pk "$PRIVATE_KEY" '.inbounds[0].streamSettings.realitySettings.privateKey = $pk' "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
 
         # Save public key
-        echo "$PUBLIC_KEY" > /usr/local/etc/xray/public_key.txt
+        printf '%s\n' "$PUBLIC_KEY" > "$XRAY_PUBLIC_KEY_FILE"
+        chmod 600 "$XRAY_PUBLIC_KEY_FILE"
 
         if [[ "$INTERACTIVE" == "true" ]]; then
             echo
@@ -2027,7 +2059,8 @@ generate_client_url() {
     # Check and fix private key if needed
     check_and_fix_private_key
 
-    local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
+    local PUBLIC_KEY
+    PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "NOT_SET")
     local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
     local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "443")
     local SERVER_NAME=$(cat /usr/local/etc/xray/server_name.txt 2>/dev/null || echo "$SNI")
@@ -2801,7 +2834,8 @@ show_connection_guide() {
         local SERVER_IP=$(curl -s -4 --max-time 3 ifconfig.me 2>/dev/null || curl -s -4 --max-time 3 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
         local PORT=$(jq -r '.inbounds[0].port' "$XRAY_CONFIG" 2>/dev/null)
         local SNI=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$XRAY_CONFIG" 2>/dev/null)
-        local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "Run './xray-manager.sh client-info' to get public key")
+        local PUBLIC_KEY
+        PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "Run './xray-manager.sh client-info' to get public key")
 
         print_color $YELLOW "When manually configuring, use these settings:"
         echo
@@ -2920,7 +2954,8 @@ generate_qr_code() {
     local EMAIL=$(echo "$CLIENT_DATA" | jq -r '.email')
 
     # Get server config
-    local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
+    local PUBLIC_KEY
+    PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "NOT_SET")
     local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
     local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "51820")
     local SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
@@ -3258,7 +3293,8 @@ generate_all_qr_codes() {
     echo
 
     # Get server config
-    local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
+    local PUBLIC_KEY
+    PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "NOT_SET")
     local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
     local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "443")
     local SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
@@ -4109,8 +4145,8 @@ run_system_diagnostics() {
         fi
 
         # Check if private key exists
-        if [[ -f "/usr/local/etc/xray/public_key.txt" ]]; then
-            PUB_KEY=$(cat /usr/local/etc/xray/public_key.txt)
+        if [[ -f "$XRAY_PUBLIC_KEY_FILE" ]]; then
+            PUB_KEY=$(get_reality_public_key 2>/dev/null || echo "")
             print_color $GREEN "\n${CHECK} Public key found: ${PUB_KEY:0:20}..."
         fi
     else
@@ -5056,7 +5092,8 @@ mass_config_generator() {
     echo
 
     # Get server config
-    local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
+    local PUBLIC_KEY
+    PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "NOT_SET")
     local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
     local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "443")
     local SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
