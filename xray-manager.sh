@@ -329,20 +329,40 @@ fetch_available_versions() {
         fi
     fi
 
-    # Fetch from GitHub API (fetch top 20 releases)
-    local VERSIONS=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases?per_page=20 2>/dev/null | grep '"tag_name"' | grep -oP '(?<="tag_name": ")v[^"]+' | sed 's/^v//' | sort -V -r)
-
-    if [[ -z "$VERSIONS" ]]; then
-        # Fallback to some common recent versions if API fails
-        VERSIONS="26
-25.12.1
-25.11.2
-25.10.15
-25.1.0
-24.12.1"
+    # GitHub returns releases newest-first, including pre-releases. Avoid a
+    # fabricated fallback list: installing a made-up "latest" is unsafe.
+    local RELEASES_JSON
+    local VERSIONS
+    if ! RELEASES_JSON=$(curl -fsSL --retry 3 \
+        'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30'); then
+        return 1
     fi
 
-    echo "$VERSIONS" | tee "$CACHE_FILE"
+    VERSIONS=$(jq -r '.[] | select(.draft == false) | .tag_name | sub("^v"; "")' \
+        <<< "$RELEASES_JSON")
+    [[ -n "$VERSIONS" ]] || return 1
+
+    printf '%s\n' "$VERSIONS" | tee "$CACHE_FILE"
+}
+
+# Resolve the newest official release, including Xray pre-releases. GitHub's
+# /releases/latest endpoint excludes pre-releases and would currently return an
+# older core instead of 26.7.28.
+get_latest_xray_version() {
+    local RELEASES_JSON
+    local LATEST_VERSION
+
+    if ! RELEASES_JSON=$(curl -fsSL --retry 3 \
+        'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30'); then
+        return 1
+    fi
+
+    LATEST_VERSION=$(jq -er '
+        [.[] | select(.draft == false)][0].tag_name | sub("^v"; "")
+    ' <<< "$RELEASES_JSON") || return 1
+
+    validate_version_format "$LATEST_VERSION" || return 1
+    printf '%s\n' "$LATEST_VERSION"
 }
 
 # Function to backup current binary before version change
@@ -835,14 +855,11 @@ install_xray() {
         fi
     fi
 
-    # If version is not specified, use latest (empty string tells the installer script to use latest)
+    # Resolve "latest" ourselves because the official installer's normal
+    # latest mode excludes pre-releases such as 26.7.28.
     if [[ -z "$REQUESTED_VERSION" ]]; then
         if [[ "$INTERACTIVE" == "true" ]]; then
-            print_color $CYAN "Installing latest version of Xray..."
-        fi
-    else
-        if [[ "$INTERACTIVE" == "true" ]]; then
-            print_color $CYAN "Installing Xray version $REQUESTED_VERSION..."
+            print_color $CYAN "Resolving the newest official Xray release..."
         fi
     fi
 
@@ -853,6 +870,18 @@ install_xray() {
     else
         apt-get update >/dev/null 2>&1
         apt-get install -y curl wget unzip jq qrencode net-tools bc iperf3 >/dev/null 2>&1
+    fi
+
+    if [[ -z "$REQUESTED_VERSION" ]]; then
+        if ! REQUESTED_VERSION=$(get_latest_xray_version); then
+            print_color $RED "${CROSS} Could not resolve the latest Xray release from GitHub"
+            print_color $YELLOW "No binary, configuration, client, UUID, or key was changed"
+            return 1
+        fi
+    fi
+
+    if [[ "$INTERACTIVE" == "true" ]]; then
+        print_color $CYAN "Installing Xray version $REQUESTED_VERSION..."
     fi
 
     # Backup current version before installing new one
@@ -884,20 +913,10 @@ install_xray() {
     fi
 
     # Download and install Xray
-    if [[ -n "$REQUESTED_VERSION" ]]; then
-        # Install specific version
-        if ! run_xray_installer "$REQUESTED_VERSION"; then
-            print_color $RED "${CROSS} Failed to install requested Xray version $REQUESTED_VERSION"
-            restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
-            return 1
-        fi
-    else
-        # Install latest version
-        if ! run_xray_installer; then
-            print_color $RED "${CROSS} Failed to install the latest Xray version"
-            restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
-            return 1
-        fi
+    if ! run_xray_installer "$REQUESTED_VERSION"; then
+        print_color $RED "${CROSS} Failed to install requested Xray version $REQUESTED_VERSION"
+        restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
+        return 1
     fi
 
     # Restore configuration if it was backed up
