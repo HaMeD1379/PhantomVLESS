@@ -717,9 +717,104 @@ version_management_menu() {
 }
 
 # Function to install Xray with optional version specification
+ensure_reality_client_compatibility() {
+    local CONFIG_FILE=${1:-$XRAY_CONFIG}
+
+    [[ -f "$CONFIG_FILE" ]] || return 0
+
+    # Xray 26.3.27+ defaults an omitted/empty minClientVer to 26.3.27.
+    # Set an explicit zero floor to preserve compatibility with existing
+    # REALITY clients without changing UUIDs, keys, short IDs, or endpoints.
+    if ! jq -e '
+        any(.inbounds[]?;
+            .streamSettings.security == "reality" and
+            ((.streamSettings.realitySettings.minClientVer // "") == "")
+        )
+    ' "$CONFIG_FILE" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local CONFIG_DIR
+    local TEMP_CONFIG
+    CONFIG_DIR=$(dirname "$CONFIG_FILE")
+    TEMP_CONFIG=$(mktemp "${CONFIG_DIR}/.config.reality-compat.XXXXXX.json")
+
+    if ! jq '
+        (.inbounds[]? |
+            select(
+                .streamSettings.security == "reality" and
+                ((.streamSettings.realitySettings.minClientVer // "") == "")
+            ) |
+            .streamSettings.realitySettings.minClientVer
+        ) = "0.0.0"
+    ' "$CONFIG_FILE" > "$TEMP_CONFIG"; then
+        rm -f "$TEMP_CONFIG"
+        print_color $RED "${CROSS} Failed to prepare REALITY client compatibility"
+        return 1
+    fi
+
+    chmod --reference="$CONFIG_FILE" "$TEMP_CONFIG"
+    chown --reference="$CONFIG_FILE" "$TEMP_CONFIG"
+
+    if [[ -x "$XRAY_BIN" ]] && ! "$XRAY_BIN" run -test -config "$TEMP_CONFIG" >/dev/null 2>&1; then
+        rm -f "$TEMP_CONFIG"
+        print_color $RED "${CROSS} REALITY compatibility config validation failed"
+        return 1
+    fi
+
+    mkdir -p "$CONFIG_BACKUP_DIR"
+    cp -a "$CONFIG_FILE" "${CONFIG_BACKUP_DIR}/config-before-reality-compat-$(date +%Y%m%d_%H%M%S).json"
+    mv -f "$TEMP_CONFIG" "$CONFIG_FILE"
+
+    if [[ "${2:-true}" == "true" ]]; then
+        print_color $GREEN "${CHECK} Preserved compatibility with existing REALITY clients"
+    fi
+}
+
+restore_xray_binary_after_failed_install() {
+    local BACKUP_DIR=$1
+    local RESTART_SERVICE=${2:-false}
+
+    if [[ -z "$BACKUP_DIR" || ! -x "$BACKUP_DIR/xray" ]]; then
+        print_color $RED "${CROSS} Automatic binary rollback is unavailable"
+        return 1
+    fi
+
+    install -m 755 "$BACKUP_DIR/xray" "$XRAY_BIN"
+    if [[ -f "${XRAY_CONFIG}.pre-install-backup" ]]; then
+        cp -a "${XRAY_CONFIG}.pre-install-backup" "$XRAY_CONFIG"
+        rm -f "${XRAY_CONFIG}.pre-install-backup"
+    fi
+    if [[ "$RESTART_SERVICE" == "true" ]]; then
+        systemctl restart xray
+    fi
+    print_color $GREEN "${CHECK} Restored Xray $(get_installed_version) after failed update"
+}
+
+run_xray_installer() {
+    local REQUESTED_VERSION=${1:-}
+    local INSTALLER_SCRIPT
+
+    if ! INSTALLER_SCRIPT=$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh); then
+        return 1
+    fi
+
+    if [[ -n "$REQUESTED_VERSION" ]]; then
+        bash -c "$INSTALLER_SCRIPT" @ install --version "$REQUESTED_VERSION" >/dev/null 2>&1
+    else
+        bash -c "$INSTALLER_SCRIPT" @ install >/dev/null 2>&1
+    fi
+}
+
 install_xray() {
     local REQUESTED_VERSION=$1
     local INTERACTIVE=${2:-true}
+    local VERSION_BACKUP_DIR=""
+    local SERVICE_WAS_ACTIVE=false
+
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        SERVICE_WAS_ACTIVE=true
+    fi
 
     if [[ "$INTERACTIVE" == "true" ]]; then
         print_color $BLUE "Installing Xray Core..."
@@ -765,7 +860,7 @@ install_xray() {
         if [[ "$INTERACTIVE" == "true" ]]; then
             print_color $CYAN "Backing up current version..."
         fi
-        backup_current_version >/dev/null
+        VERSION_BACKUP_DIR=$(backup_current_version)
         if [[ "$INTERACTIVE" == "true" ]]; then
             print_color $GREEN "${CHECK} Backup complete"
         fi
@@ -776,6 +871,9 @@ install_xray() {
     mkdir -p /usr/local/etc/xray
     mkdir -p "$CONFIG_BACKUP_DIR"
     mkdir -p "$XRAY_VERSIONS_DIR"
+
+    # Newer cores otherwise reject older REALITY clients by default.
+    ensure_reality_client_compatibility "$XRAY_CONFIG" "$INTERACTIVE" || return 1
 
     # Backup current config if it exists
     if [[ -f "$XRAY_CONFIG" ]]; then
@@ -788,11 +886,18 @@ install_xray() {
     # Download and install Xray
     if [[ -n "$REQUESTED_VERSION" ]]; then
         # Install specific version
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version "$REQUESTED_VERSION" >/dev/null 2>&1 || \
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
+        if ! run_xray_installer "$REQUESTED_VERSION"; then
+            print_color $RED "${CROSS} Failed to install requested Xray version $REQUESTED_VERSION"
+            restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
+            return 1
+        fi
     else
         # Install latest version
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
+        if ! run_xray_installer; then
+            print_color $RED "${CROSS} Failed to install the latest Xray version"
+            restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
+            return 1
+        fi
     fi
 
     # Restore configuration if it was backed up
@@ -813,14 +918,21 @@ install_xray() {
     if [[ -x "$XRAY_BIN" ]]; then
         local INSTALLED_VERSION=$(get_installed_version)
 
-        if [[ "$INTERACTIVE" == "true" ]]; then
-            print_color $GREEN "Xray installed successfully (version: $INSTALLED_VERSION)"
+        if [[ -f "$XRAY_CONFIG" ]] && ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
+            print_color $RED "${CROSS} Installed Xray cannot load the existing configuration"
+            restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
+            return 1
         fi
 
-        # Verify the version matches requested (if version was specified)
+        # A requested version must never silently turn into a different update.
         if [[ -n "$REQUESTED_VERSION" && "$INSTALLED_VERSION" != "$REQUESTED_VERSION" ]]; then
-            print_color $YELLOW "⚠ Note: Requested version $REQUESTED_VERSION, but installed version is $INSTALLED_VERSION"
-            print_color $YELLOW "  (The installer script may have installed a different version)"
+            print_color $RED "${CROSS} Requested $REQUESTED_VERSION, but installer provided $INSTALLED_VERSION"
+            restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
+            return 1
+        fi
+
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $GREEN "Xray installed successfully (version: $INSTALLED_VERSION)"
         fi
 
         # Test key generation
@@ -1567,6 +1679,7 @@ configure_xray() {
             "$SERVER_NAME"
           ],
           "privateKey": "$PRIVATE_KEY",
+          "minClientVer": "0.0.0",
           "shortIds": [
             "$SHORT_ID"
           ]
