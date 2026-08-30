@@ -1,947 +1,316 @@
-# Xray Manager (VLESS + REALITY Control Panel)
+# PhantomVLESS Xray Manager
 
-This project is a single, feature-rich Bash script that turns a plain Linux VPS into a managed Xray Core server using a modern stack:
+PhantomVLESS is a single-file Bash manager for operating **Xray Core** on a Linux VPS with **VLESS**, **XTLS-Vision**, **REALITY**, and platform-focused client profiles.
 
-- **Protocol:** VLESS
-- **Security:** XTLS-Vision + REALITY + uTLS
-- **Entry point:** `xray-manager.sh`
+The current manager version is **3.3.1**.
 
-It wraps Xray Core, systemd, and a small set of helper files into a cohesive "control panel" you can run directly in your terminal.
+## Quick Install
 
-> **TL;DR:** Run one script on a fresh Debian/Ubuntu VPS, answer a few questions, and get a fully configured VLESS+REALITY server with client QR codes, mass config generation, and connection guides.
-
----
-
-## Overview
-
-<img src="UI Screenshots/Dashboard.png" width="800" alt="Dashboard">
-
-### What This Project Is
-
-`xray-manager.sh` is an interactive Bash-based manager for **Xray Core** configured as a:
-
-- VLESS inbound
-- Secured by REALITY (X25519 key pair)
-- Typically on port 443
-- Impersonating popular TLS websites (e.g., Google, Cloudflare) without needing a real certificate or domain
-
-### Key Features
-
-#### Core Features ✨
-- One-command **install** and **configure** flow for VLESS + REALITY
-- **Smart port selection** with automatic system scanning
-- **Auto-apply firewall rules** (UFW, iptables, firewalld)
-- **IPv4 prioritization** to prevent IPv6-only issues
-- **Comprehensive firewall guide** for 7 major VPS providers
-- Intuitive **TUI menu** with 35 numbered actions
-
-#### Client Management ✨
-- **Client management** (add/list/remove) with automatic UUID & short ID generation
-- **Mass Client Remover** (NEW): Remove by pattern, range, or interactive selection
-- **Connection export**: VLESS URLs, QR codes (ASCII & PNG)
-
-#### Version Management (NEW ✨)
-- **Install specific Xray Core version** (e.g., 25.10.15 vs 26)
-- **Automatic backup on version change**
-- **Rollback to previous version**
-- **Preserve existing clients** across version switches
-
-#### Performance Optimization (NEW ✨)
-- **BBR Congestion Control** (2-3x throughput improvement)
-- **Network buffer tuning** (64MB for high-latency connections)
-- **File descriptor optimization** (1M+ concurrent connections)
-- **TCP/IP stack tuning** for proxy server workloads
-- **Verification checklist** (10-point audit)
-- **Graceful reboot** with countdown
-
-#### Bulk Operations (NEW ✨)
-- **Mass Config Generator**: Create 1-1000 configs with QR codes
-- **HTML visual gallery** for client organization
-- **Complete configs list** with VLESS URLs
-
-#### Migration & Export (NEW ✨)
-- **Export clients** for seamless VPS migration
-- **Import clients** from export file with fresh UUID generation
-- **Batch QR code generation** for all existing clients
-- **HTML gallery output** with all client QR codes
-
-#### System Management ✨
-- **Server Benchmark** (CPU, memory, disk, network analysis)
-- **Performance tier classification**
-- **Concurrent connection recommendations**
-- **Systemd integration** with proper resource limits
-- **DPI/security evasion tests**
-- **Connection guides** for all platforms (Android/iOS/Windows/macOS/Linux)
-
----
-
-## Quick Start
-
-### Installation
+Run this on a Debian/Ubuntu VPS with root access:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh | sudo bash
+sudo apt-get update && sudo apt-get install -y bash curl ca-certificates unzip jq qrencode openssl iproute2 net-tools bc iperf3 && curl -fsSL https://raw.githubusercontent.com/HaMeD1379/my_vps/main/xray-manager.sh -o /tmp/xray-manager.sh && sudo bash /tmp/xray-manager.sh
 ```
 
-This single command will:
-1. Download the script
-2. **Automatically install** it to `/usr/local/bin/xray-manager.sh`
-3. Launch the interactive menu automatically
+The first run installs the manager atomically to:
 
-After installation, you can run it anytime with:
+```text
+/usr/local/bin/xray-manager.sh
+```
+
+After that, open the manager anytime with:
+
 ```bash
 sudo xray-manager.sh
 ```
 
-<details>
-<summary>Alternative: Manual Installation</summary>
+## What It Manages
 
-**Option A: Clone and run (auto-installs)**
-```bash
-git clone https://github.com/HaMeD1379/PhantomVLESS.git
-cd PhantomVLESS
-sudo bash xray-manager.sh
-```
-The script will automatically copy itself to `/usr/local/bin/` on first run.
+- Xray binary: `/usr/local/bin/xray`
+- Xray config: `/usr/local/etc/xray/config.json`
+- Client database: `/usr/local/etc/xray/clients.json`
+- REALITY public key cache: `/usr/local/etc/xray/public_key.txt`
+- Runtime helper files: `sni.txt`, `port.txt`, `server_name.txt`, `server_address.txt`
+- Systemd service: `/etc/systemd/system/xray.service`
+- Xray logs: `/var/log/xray/access.log` and `/var/log/xray/error.log`
+- Config backups: `/usr/local/etc/xray/backups`
+- Complete manager/update backups: `/usr/local/etc/xray/manager-backups`
 
-**Option B: Direct download**
+## Main Features
+
+- One-line install and self-install to `/usr/local/bin/xray-manager.sh`
+- Interactive terminal dashboard with manager version, Xray version, service state, boot state, OS, kernel, and configured profiles
+- Latest stable Xray Core installation from official GitHub releases
+- Stable version switching, experimental prerelease install option, and rollback from complete backups
+- Existing VLESS + XTLS-Vision + REALITY configuration migration and verification
+- Automatic REALITY public key derivation from the server private key, including repair of stale cached public keys
+- Compatibility safeguard for newer Xray releases by setting REALITY `minClientVer` to `0.0.0`
+- Multi-platform profile migration and verification
+- Legacy TCP/Vision/REALITY profile preservation for existing clients
+- iOS / Shadowrocket-compatible profile handling
+- Advanced Android/Desktop profile support with XHTTP and VLESS Encryption when the installed Xray supports it
+- Add, list, inspect, and remove client profiles
+- Mass client generation, bulk QR export, and mass removal tools
+- Per-client VLESS URLs and terminal QR codes
+- QR generation for every client with an HTML index
+- Export and import clients for VPS migration
+- Service control: start, stop, restart, enable at boot, disable at boot
+- Log viewing, saving, and clearing
+- Redacted config viewer
+- Complete configuration backup and restore
+- Full system diagnostics, REALITY key verification, and DPI/leak checks
+- Server benchmark and system performance optimizer
+- Optional cleanup for old WireGuard, Caddy, and wstunnel setups
+- Admin help explaining the components managed by the script
+
+## Requirements
+
+- Debian or Ubuntu-style Linux VPS
+- `systemd`
+- Root privileges, usually through `sudo`
+- Public IPv4 or reachable domain/IP
+- Outbound internet access to GitHub
+- Supported CPU architecture for automatic Xray binary updates:
+  - `x86_64` / `amd64`
+  - `aarch64` / `arm64`
+
+The quick install command installs the tools the current script expects: `bash`, `curl`, `ca-certificates`, `unzip`, `jq`, `qrencode`, `openssl`, `iproute2`, `net-tools`, `bc`, and `iperf3`.
+
+## First Run
+
+1. Run the quick install command.
+2. In the menu, choose `1` to install or update the latest stable Xray Core.
+3. If `/usr/local/etc/xray/config.json` already exists, choose `2` to migrate and verify multi-platform profiles.
+4. Open each configured TCP port in your VPS provider firewall.
+5. Use menu options `8` and `5` to enable and start the service.
+6. Use option `13`, `14`, `15`, or `35` to get client connection details.
+
+The current production manager preserves and migrates an existing REALITY identity. It does not synthesize a brand-new server configuration when no existing Xray config is present.
+
+## Current Menu
+
+| Option | Action |
+| --- | --- |
+| `1` | Install or update latest stable Xray Core |
+| `2` | Migrate and verify multi-platform profiles |
+| `3` | Uninstall Xray |
+| `4` | Version management and rollback |
+| `5` | Start service |
+| `6` | Stop service |
+| `7` | Restart service |
+| `8` | Enable service at boot |
+| `9` | Disable service at boot |
+| `10` | Add client / platform bundle |
+| `11` | Remove a client profile |
+| `12` | List all client profiles |
+| `13` | Show client connection details |
+| `14` | Generate a client QR code |
+| `15` | Platform setup guides |
+| `16` | Client profile statistics |
+| `17` | View service logs |
+| `18` | Save logs to a file |
+| `19` | Clear logs |
+| `20` | Detailed system status |
+| `21` | Back up complete configuration |
+| `22` | Restore complete configuration |
+| `23` | View redacted configuration |
+| `24` | Remove old VPN systems |
+| `25` | Admin help and component explanations |
+| `26` | Run full system diagnostics |
+| `27` | Verify REALITY key relationships |
+| `28` | DPI and leak security checks |
+| `29` | Server benchmark and recommendations |
+| `30` | Optimize system performance |
+| `31` | Mass client generator and QR export |
+| `32` | Mass client remover |
+| `33` | Export clients for VPS migration |
+| `34` | Import clients from an export |
+| `35` | Generate QR codes for every client |
+| `36` | Migrate legacy clients to compatibility bundles |
+| `0` | Exit |
+
+## Command-Line Usage
+
+Run without arguments for the interactive menu:
+
 ```bash
-sudo curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh -o /usr/local/bin/xray-manager.sh
-sudo chmod +x /usr/local/bin/xray-manager.sh
 sudo xray-manager.sh
 ```
-</details>
 
-### First-Time Setup
-
-```bash
-sudo xray-manager.sh
-
-```
-
-Then:
-1. **Option 1**: Install Xray Core
-2. **Option 2**: Configure VLESS + REALITY
-3. **Option 30** (Optional): Optimize System for Maximum Performance
-4. **Option 8**: Enable auto-start
-5. **Option 5**: Start service
-6. Configure your VPS provider firewall (instructions provided)
-7. **Option 14**: Generate QR code for first client
-
----
-
-## Menu Options (35 Total)
-
-### Installation & Setup (1-4)
-- 1) Install Xray Core
-- 2) Configure VLESS + REALITY
-- 3) Uninstall Xray
-- 4) Version Management (Install/Switch/Rollback) **NEW**
-
-### Service Control (5-9)
-- 5) Start service
-- 6) Stop service
-- 7) Restart service
-- 8) Enable auto-start
-- 9) Disable auto-start
-
-### Client Management (10-16)
-
-<img src="UI Screenshots/QRCode Gen.png" width="600" alt="QRCode Generation">
-
-- 10) Add new client (Wizard)
-- 11) Remove client
-- 12) List all clients
-- 13) Show client connection info
-- 14) Generate QR code
-- 15) Connection guides (Android/iOS/Desktop)
-- 16) Client traffic statistics
-
-### Logs & Monitoring (17-20)
-- 17) View logs
-- 18) Save logs to file
-- 19) Clear logs
-- 20) Detailed system status
-
-### Configuration (21-23)
-- 21) Backup configuration
-- 22) Restore configuration
-- 23) View current config
-
-### System & Advanced (24-28)
-- 24) Remove old VPN systems (WireGuard/Caddy/wstunnel)
-- 25) Admin help (component explanations)
-- 26) Run system diagnostics
-- 27) Check and fix private key
-- 28) DPI & Leak Security Test
-
-### Performance & Mass Tools (29-32) **NEW**
-- 29) Server Benchmark & Recommendations
-- 30) Optimize System for Maximum Performance
-- 31) Mass Config Generator (Bulk + QR Codes)
-- 32) Mass Client Remover
-
-### Migration & Export (33-35) **NEW**
-- 33) Export clients (for VPS migration)
-- 34) Import clients (from export file)
-- 35) Generate QR codes for ALL clients
-
----
-
-## Advanced Features
-
-### Version Management
-
-Switch between any Xray Core version:
+Useful direct commands:
 
 ```bash
-sudo ./xray-manager.sh switch-version 25.10.15
+sudo xray-manager.sh install
+sudo xray-manager.sh configure
+sudo xray-manager.sh start
+sudo xray-manager.sh restart
+sudo xray-manager.sh status
+sudo xray-manager.sh add-client
+sudo xray-manager.sh list-clients
+sudo xray-manager.sh client-info
+sudo xray-manager.sh qr
+sudo xray-manager.sh qr-all
+sudo xray-manager.sh export-clients
+sudo xray-manager.sh import-clients
+sudo xray-manager.sh diagnostics
+sudo xray-manager.sh benchmark
+sudo xray-manager.sh optimize
+sudo xray-manager.sh migrate
+sudo xray-manager.sh versions
+sudo xray-manager.sh manager-version
 ```
 
-Or use the interactive menu (Option 4):
-- Install specific version
-- Automatic backup before switching
-- Rollback to previous version
-- All clients remain valid
+## Version Management
 
-### Mass Config Generation
+The manager installs Xray directly from official `XTLS/Xray-core` release assets.
 
-Generate 1-1000 client configs in seconds:
-- Menu Option 31
-- Automatic naming (PREFIX_001, PREFIX_002, etc.)
-- PNG QR codes for each client
-- HTML visual gallery
-- Complete VLESS URL list
+- Normal updates use the latest stable release.
+- Specific stable versions can be installed from the version menu or with `switch-version`.
+- Experimental prereleases require the explicit experimental action.
+- Before updates, removals, imports, migrations, and self-updates, the manager can create complete state backups under `/usr/local/etc/xray/manager-backups`.
+- If an update fails validation or health checks, the manager restores the previous state when possible.
 
-### System Optimization
+## Firewall Notes
 
-Enable BBR + network tuning + file descriptor limits:
-- Menu Option 30
-- 2-3x throughput improvement with BBR
-- 64MB network buffers for high-latency connections
-- 1M file descriptor support
-- 10-point verification checklist
-- Graceful reboot with countdown
+You must allow inbound **TCP** traffic to the configured Xray port.
 
-### Server Benchmarking
+Open the port in both places when applicable:
 
-Analyze your server capabilities:
-- Menu Option 29
-- CPU/Memory/Disk/Network analysis
-- Performance tier classification
-- Concurrent connection recommendations
-- Optimization status check
+- Your VPS provider firewall or security group
+- Your server firewall, such as `ufw`, `iptables`, or `firewalld`
 
-### VPS Migration
+When local firewall automation is available, the manager can help with server-side rules; provider firewalls must usually be updated manually from the cloud dashboard.
 
-Seamlessly migrate clients to a new VPS:
-- Menu Option 33: Export clients (names only, portable format)
-- Menu Option 34: Import clients (fresh UUIDs generated)
-- Menu Option 35: Generate QR codes for all imported clients
-- HTML gallery with all QR codes for easy distribution
+## Client Profiles
 
----
+The manager stores clients in `clients.json` and keeps them synchronized with `config.json`.
 
-## File Structure
+Current profile concepts:
 
-After running the script, you'll have:
+- **Legacy / Existing:** Preserves existing TCP + Vision + REALITY clients.
+- **iOS / Shadowrocket:** Uses a Shadowrocket-friendly REALITY profile, currently sharing the stable legacy listener when appropriate.
+- **Android + Desktop / Advanced:** Uses XHTTP and VLESS Encryption when the installed Xray binary supports it.
 
-```
-/usr/local/bin/xray-manager.sh          # Main script
-/usr/local/bin/xray                      # Xray binary
-/usr/local/etc/xray/
-├── config.json                          # Main Xray config
-├── clients.json                         # Client registry
-├── public_key.txt                       # REALITY public key
-├── sni.txt                              # SNI/server name
-├── port.txt                             # Listening port
-├── server_name.txt                      # Friendly hostname
-├── versions/                            # Version backups
-├── backups/                             # Config backups
-└── benchmark_results.json               # Performance data (NEW)
+Use the add-client wizard to create a platform bundle, or use the migration options to preserve older clients while adding newer companion profiles.
 
-/etc/systemd/system/xray.service                # Service unit
-/etc/systemd/system/xray.service.d/override.conf  # Limits override
-/etc/sysctl.d/99-xray-performance.conf           # Kernel tuning (NEW)
-/etc/security/limits.d/99-xray-performance.conf  # File limits (NEW)
+## Backups, Export, and Migration
 
-/var/log/xray/
-├── access.log                           # Connection log
-└── error.log                            # Error log
-```
-
----
-
-## Configuration
-
-<img src="UI Screenshots/Configuration.png" width="800" alt="Configuration">
-
-### Main Configuration Files
-
-**`/usr/local/etc/xray/config.json`**
-- VLESS + REALITY inbound configuration
-- Outbound routing rules
-- Logging configuration
-
-**`/usr/local/etc/xray/clients.json`**
-- Client registry (uuid, email, shortId, created, mass_generated)
-- Used by script for client management
-
-**Helper state files:**
-- `public_key.txt` — REALITY public key
-- `sni.txt` — SNI/server name
-- `port.txt` — Listening port
-- `server_name.txt` — Friendly name
-
-### Performance Optimization (NEW)
-
-When you run Option 30, the script configures:
-
-**BBR Congestion Control**
-- `net.ipv4.tcp_congestion_control = bbr`
-- `net.core.default_qdisc = fq`
-- Expected: 2-3x throughput improvement
-
-**Network Buffers**
-- `net.core.rmem_max = 67108864` (64MB)
-- `net.core.wmem_max = 67108864` (64MB)
-- Great for high-latency connections
-
-**File Descriptor Limits**
-- `fs.file-max = 2097152`
-- Supports 1M+ concurrent connections
-
-**Systemd Limits**
-- `DefaultLimitNOFILE=1048576`
-- Service and per-user limits
-
----
-
-## Common Workflows
-
-### Add a Single Client
-
-1. Menu → Option 10 (Add new client)
-2. Enter label/email (or accept default)
-3. Script generates UUID + Short ID
-4. Get VLESS URL and QR code
-
-### Bulk Generate 100 Clients
-
-1. Menu → Option 31 (Mass Config Generator)
-2. Enter base name (e.g., "TRIAL")
-3. Enter count (100)
-4. Output: `~/xray_mass_TRIAL_TIMESTAMP/`
-   - `qrcodes/` — PNG QR codes
-   - `configs/` — Text config files
-   - `index.html` — Visual gallery
-   - `configs_list.txt` — All VLESS URLs
-
-### Remove 50 Clients Safely
-
-1. Menu → Option 32 (Mass Client Remover)
-2. Choose removal method:
-   - By pattern: `TRIAL_*`
-   - By range: `TRIAL_001` to `TRIAL_050`
-   - Interactive: Pick from list
-3. Confirm deletion
-4. Done!
-
-### Switch Xray Version
-
-1. Menu → Option 4 (Version Management)
-2. Option 1: Install/Switch Version
-3. Choose version (e.g., 25.10.15)
-4. Script:
-   - Backs up current version
-   - Downloads new version
-   - Preserves all clients
-   - Restarts service
-
-### Optimize System Performance
-
-1. Menu → Option 30 (Optimize System)
-2. Review optimizations
-3. Script applies BBR + tuning + limits
-4. If reboot needed:
-   - 10-second countdown
-   - Press Ctrl+C to cancel
-   - SSH reconnects in ~30 seconds
-
-### Migrate Clients to New VPS
-
-**On old VPS:**
-1. Menu → Option 33 (Export clients)
-2. Copy the export file (e.g., `~/xray_clients_export_TIMESTAMP.json`)
-
-**On new VPS:**
-1. Install and configure Xray (Options 1 & 2)
-2. Copy export file to new VPS
-3. Menu → Option 34 (Import clients)
-4. Select the export file
-5. Menu → Option 35 (Generate QR codes for ALL clients)
-6. Share new QR codes with your clients
-
-### Generate QR Codes for All Clients
-
-1. Menu → Option 35 (Generate QR codes for ALL clients)
-2. Confirm the operation
-3. Output: `~/xray_qr_all_TIMESTAMP/`
-   - Individual PNG QR codes
-   - `index.html` — Visual gallery with all clients
-
----
+- Option `21` creates a complete configuration backup.
+- Option `22` restores a configuration backup.
+- Option `33` exports client names and migration data.
+- Option `34` imports clients from an export.
+- Option `36` migrates legacy clients to compatibility bundles.
+- Xray updates and manager self-updates use complete state backups in `manager-backups`.
 
 ## Troubleshooting
 
-### Client Cannot Connect
-**Most common cause: Firewall!**
-1. Check VPS provider firewall (Hetzner, DigitalOcean, etc.)
-2. Verify local firewall: `ss -tlnp | grep xray`
-3. Run Option 26 (Diagnostics)
-4. Run Option 28 (DPI Test)
+Use these checks first:
 
-### Service Won't Start
-1. Run Option 26 (System Diagnostics)
-2. Check logs: `journalctl -u xray -n 50`
-3. Validate config: `xray -test -c /usr/local/etc/xray/config.json`
+```bash
+sudo xray-manager.sh diagnostics
+sudo xray-manager.sh status
+sudo xray-manager.sh logs
+systemctl status xray --no-pager -l
+ss -tlnp | grep xray
+```
 
-### Slow Performance
-1. Run Option 29 (Server Benchmark)
-2. Run Option 30 (System Optimization)
-3. Check if BBR is active: `sysctl net.ipv4.tcp_congestion_control`
-4. Try different SNI destination
+Common issues:
 
-### After Switching Versions
-- Always regenerate QR codes (Option 14)
-- All clients remain valid
-- No reconfiguration needed
-
----
+- If the service does not start, run diagnostics and view the systemd logs.
+- If clients cannot connect, confirm the server address, port, UUID, short ID, REALITY public key, SNI, and firewall rules.
+- If QR codes or URLs look wrong, run `sudo xray-manager.sh fix-key` to verify the REALITY key relationship.
+- If a new Xray version breaks compatibility, use the rollback option from the version menu.
 
 ## Security Notes
 
-- Script runs as **root** — only trust what you inspect
-- Protect sensitive files:
-  - `config.json`
-  - `clients.json`
-  - `public_key.txt`
-- Don't share VLESS URLs publicly
-- Rotate clients/keys periodically
-- Backups are created automatically for major operations
+- This script is designed to run as root. Review it before running it on a server.
+- Do not share `config.json`, `clients.json`, private keys, exported client files, or QR codes publicly.
+- VLESS URLs and QR codes grant access to your proxy.
+- Keep SSH access protected before changing firewall rules.
+- Back up `/usr/local/etc/xray` before major changes.
 
 ---
 
-## System Requirements
+<div dir="rtl" lang="fa">
 
-- **OS:** Debian/Ubuntu with systemd
-- **Network:** Public IPv4 address
-- **Tools:** bash, curl, wget, unzip, jq, qrencode, net-tools, bc
+# راهنمای فارسی PhantomVLESS Xray Manager
 
-The script installs missing dependencies automatically.
+PhantomVLESS یک اسکریپت Bash تک‌فایلی برای مدیریت Xray Core روی VPS است. این ابزار پیکربندی‌های VLESS، XTLS-Vision، REALITY و پروفایل‌های مخصوص اندروید، iOS و دسکتاپ را از داخل ترمینال مدیریت می‌کند.
 
----
+نسخه فعلی مدیر: <strong>3.3.1</strong>
 
-## Changelog
+## نصب سریع
 
-### Version 2.1 (February 2026)
-- ✨ VPS Migration: Export clients for seamless server migration
-- ✨ VPS Migration: Import clients with automatic UUID generation
-- ✨ Batch QR Code Generator for all existing clients
-- ✨ HTML gallery output for bulk QR code distribution
-- 🔧 Menu expanded to 35 options
+این دستور را روی VPS دبیان/اوبونتو با دسترسی روت اجرا کنید:
 
-### Version 2.0 (February 2026)
-- ✨ Version Management (install/switch/rollback)
-- ✨ Mass Config Generator (1-1000 configs)
-- ✨ Mass Client Remover (pattern/range/interactive)
-- ✨ System Performance Optimization (BBR + tuning)
-- ✨ Server Benchmark & Recommendations
-- 🔧 Graceful reboot with countdown
-- 🔧 10-point verification checklist
-- 🐛 Fixed color escape sequences in menus
+<pre dir="ltr"><code>sudo apt-get update && sudo apt-get install -y bash curl ca-certificates unzip jq qrencode openssl iproute2 net-tools bc iperf3 && curl -fsSL https://raw.githubusercontent.com/HaMeD1379/my_vps/main/xray-manager.sh -o /tmp/xray-manager.sh && sudo bash /tmp/xray-manager.sh</code></pre>
 
-### Version 1.0 (Initial Release)
-- Core: Install, Configure, Add/Remove clients
-- QR code generation, Service management
-- DPI security tests, Connection guides
+بعد از اولین اجرا، اسکریپت در مسیر زیر نصب می‌شود:
 
----
+<pre dir="ltr"><code>/usr/local/bin/xray-manager.sh</code></pre>
 
-## Support & Help
+برای اجرای دوباره:
 
-1. Run **Option 26**: System Diagnostics
-2. Run **Option 28**: DPI & Security Test
-3. Save logs: **Option 18**
-4. Check `/var/log/xray/error.log`
+<pre dir="ltr"><code>sudo xray-manager.sh</code></pre>
 
-For detailed help, run: **Option 25** (Admin Help)
+## امکانات اصلی
 
----
+- نصب یک‌خطی و نصب خودکار مدیر در مسیر استاندارد
+- داشبورد ترمینالی برای نمایش نسخه مدیر، نسخه Xray، وضعیت سرویس، وضعیت اجرای خودکار، سیستم‌عامل و پروفایل‌های فعال
+- نصب یا به‌روزرسانی آخرین نسخه پایدار Xray Core
+- مدیریت نسخه‌ها، نصب نسخه پایدار مشخص، نصب نسخه آزمایشی با تایید صریح، و بازگشت به نسخه قبلی
+- مهاجرت و بررسی پیکربندی موجود VLESS + XTLS-Vision + REALITY
+- استخراج و اصلاح خودکار کلید عمومی REALITY از روی کلید خصوصی سرور
+- حفظ سازگاری کلاینت‌های قدیمی با تنظیم مقدار <code dir="ltr">minClientVer</code> روی <code dir="ltr">0.0.0</code>
+- مهاجرت و بررسی پروفایل‌های چندپلتفرمی
+- حفظ کلاینت‌های قدیمی TCP/Vision/REALITY
+- پشتیبانی از پروفایل مناسب iOS و Shadowrocket
+- پشتیبانی از پروفایل پیشرفته اندروید و دسکتاپ با XHTTP و VLESS Encryption، در صورت پشتیبانی نسخه نصب‌شده Xray
+- افزودن، نمایش، بررسی و حذف کلاینت‌ها
+- ساخت انبوه کانفیگ و خروجی QR
+- ساخت QR برای همه کلاینت‌ها همراه با فایل HTML
+- خروجی گرفتن و وارد کردن کلاینت‌ها برای مهاجرت به VPS دیگر
+- کنترل سرویس: شروع، توقف، راه‌اندازی دوباره، فعال‌سازی در زمان بوت و غیرفعال‌سازی
+- مشاهده، ذخیره و پاک کردن لاگ‌ها
+- نمایش نسخه امن و مخفی‌شده پیکربندی
+- بکاپ کامل و بازیابی پیکربندی
+- عیب‌یابی کامل سیستم، بررسی کلیدهای REALITY و تست‌های DPI/Leak
+- بنچمارک سرور و بهینه‌سازی عملکرد سیستم
+- پاک‌سازی اختیاری WireGuard، Caddy و wstunnel قدیمی
 
-## License
+## اجرای اولیه
 
-This project currently has no explicit license. Modify and distribute as needed, with appropriate attribution.
+۱. دستور نصب سریع را اجرا کنید.
+۲. از منو گزینه <code dir="ltr">1</code> را برای نصب یا به‌روزرسانی آخرین نسخه پایدار Xray انتخاب کنید.
+۳. اگر فایل <code dir="ltr">/usr/local/etc/xray/config.json</code> از قبل وجود دارد، گزینه <code dir="ltr">2</code> را برای مهاجرت و بررسی پروفایل‌های چندپلتفرمی انتخاب کنید.
+۴. پورت یا پورت‌های TCP پیکربندی‌شده را در فایروال پنل ارائه‌دهنده VPS باز کنید.
+۵. با گزینه‌های <code dir="ltr">8</code> و <code dir="ltr">5</code> سرویس را برای بوت فعال و سپس اجرا کنید.
+۶. برای دریافت لینک یا QR کلاینت از گزینه‌های <code dir="ltr">13</code>، <code dir="ltr">14</code>، <code dir="ltr">15</code> یا <code dir="ltr">35</code> استفاده کنید.
 
----
+نسخه فعلی مدیر برای حفظ و مهاجرت هویت REALITY موجود طراحی شده است. اگر هیچ پیکربندی Xray از قبل وجود نداشته باشد، این نسخه پیکربندی کاملا جدید تولید نمی‌کند.
 
-<div dir="rtl">
+## نکات فایروال
 
-# نسخه فارسی (Persian Version)
+باید پورت انتخاب‌شده Xray را برای ورودی TCP باز کنید. اگر فایروال محلی مثل ufw، iptables یا firewalld فعال باشد، اسکریپت تلاش می‌کند قانون لازم را اضافه کند؛ اما فایروال پنل VPS معمولا باید دستی تنظیم شود.
 
-# مدیریت Xray (پنل کنترل VLESS + REALITY)
+## دستورات کاربردی
 
-این پروژه یک اسکریپت Bash تک‌فایلی و پرامکانات است که یک سرور لینوکس (VPS) خام را با استفاده از پشته‌ای مدرن به یک سرور مدیریت‌شده Xray Core تبدیل می‌کند:
-
-- **پروتکل:** VLESS
-- **امنیت:** XTLS-Vision + REALITY + uTLS
-- **نقطه ورود:** `xray-manager.sh`
-
-این اسکریپت Xray Core، systemd و مجموعه‌ای کوچک از فایل‌های کمکی را در قالب یک "پنل کنترل" منسجم که می‌توانید مستقیماً در ترمینال اجرا کنید، بسته‌بندی می‌کند.
-
-> **خلاصه:** یک اسکریپت را روی یک VPS تازه دبیان/اوبونتو اجرا کنید، به چند سوال پاسخ دهید و یک سرور VLESS+REALITY کاملاً پیکربندی شده همراه با کدهای QR برای کلاینت، تولید کانفیگ انبوه و راهنمای اتصال دریافت کنید.
-
----
-
-## بررسی اجمالی (Overview)
-
-<img src="UI Screenshots/Dashboard.png" width="800" alt="Dashboard">
-
-### این پروژه چیست
-
-`xray-manager.sh` یک مدیر تعاملی مبتنی بر Bash برای **Xray Core** است که به صورت زیر پیکربندی شده است:
-
-- ورودی VLESS
-- ایمن شده توسط REALITY (جفت کلید X25519)
-- معمولاً روی پورت 443
-- جعل وب‌سایت‌های محبوب TLS (مانند Google، Cloudflare) بدون نیاز به گواهی یا دامنه واقعی
-
-### ویژگی‌های کلیدی
-
-#### ویژگی‌های اصلی ✨
-- جریان **نصب** و **پیکربندی** VLESS + REALITY فقط با یک دستور
-- **انتخاب هوشمند پورت** با اسکن خودکار سیستم
-- **اعمال خودکار قوانین فایروال** (UFW, iptables, firewalld)
-- **اولویت‌بندی IPv4** برای جلوگیری از مشکلات IPv6-only
-- **راهنمای جامع فایروال** برای 7 ارائه دهنده محبوب VPS
-- **منوی متنی (TUI)** بصری با 35 عملکرد شماره‌گذاری شده
-
-#### مدیریت کلاینت ✨
-- **مدیریت کلاینت** (افزودن/لیست/حذف) با تولید خودکار UUID و Short ID
-- **حذف کننده انبوه کلاینت** (جدید): حذف بر اساس الگو، محدوده یا انتخاب تعاملی
-- **خروجی اتصال**: لینک‌های VLESS، کدهای QR (ASCII و PNG)
-
-#### مدیریت نسخه (جدید ✨)
-- **نصب نسخه خاص Xray Core** (مثلاً 25.10.15 در مقابل 26)
-- **بکاپ خودکار هنگام تغییر نسخه**
-- **بازگشت به نسخه قبلی (Rollback)**
-- **حفظ کلاینت‌های موجود** هنگام تغییر نسخه
-
-#### بهینه‌سازی عملکرد (جدید ✨)
-- **کنترل ازدحام BBR** (بهبود 2 تا 3 برابری پهنای باند)
-- **تنظیم بافر شبکه** (64MB برای اتصالات با تاخیر بالا)
-- **بهینه‌سازی توصیف‌گر فایل** (پشتیبانی از بیش از 1 میلیون اتصال همزمان)
-- **تنظیم پشته TCP/IP** برای بارهای کاری سرور پروکسی
-- **چک‌لیست تایید** (ممیزی 10 نقطه‌ای)
-- **ریستارت نرم** با شمارش معکوس
-
-#### عملیات انبوه (جدید ✨)
-- **تولید کننده کانفیگ انبوه**: ایجاد 1 تا 1000 کانفیگ با کدهای QR
-- **گالری تصویری HTML** برای سازماندهی کلاینت‌ها
-- **لیست کامل کانفیگ‌ها** با لینک‌های VLESS
-
-#### انتقال و صادرات (جدید ✨)
-- **صادرات کلاینت‌ها** برای انتقال بدون دردسر به VPS جدید
-- **وارد کردن کلاینت‌ها** از فایل صادراتی با تولید خودکار UUID جدید
-- **تولید انبوه کد QR** برای همه کلاینت‌های موجود
-- **خروجی گالری HTML** با همه کدهای QR کلاینت‌ها
-
-#### مدیریت سیستم ✨
-- **بنچمارک سرور** (تحلیل CPU، حافظه، دیسک، شبکه)
-- **طبقه‌بندی سطح عملکرد**
-- **توصیه‌های اتصال همزمان**
-- **یکپارچه‌سازی با systemd** با محدودیت‌های منابع مناسب
-- **تست‌های فرار از DPI/امنیت**
-- **راهنمای اتصال** برای همه پلتفرم‌ها (Android/iOS/Windows/macOS/Linux)
-
----
-
-## شروع سریع (Quick Start)
-
-### نصب (Installation)
-
-```bash
-curl -sL https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh | sudo bash
-```
-
-این دستور به صورت خودکار:
-1. اسکریپت را دانلود می‌کند
-2. آن را در `/usr/local/bin/xray-manager.sh` نصب می‌کند
-3. منوی تعاملی را راه‌اندازی می‌کند
-
-بعد از نصب، می‌توانید هر زمان با این دستور اجرا کنید:
-```bash
-sudo xray-manager.sh
-```
-
-<details>
-<summary>روش جایگزین: نصب دستی</summary>
-
-```bash
-git clone https://github.com/HaMeD1379/PhantomVLESS.git
-cd PhantomVLESS
-sudo cp xray-manager.sh /usr/local/bin/
-sudo chmod +x /usr/local/bin/xray-manager.sh
-sudo xray-manager.sh
-```
-</details>
-
-### تنظیم اولیه (First-Time Setup)
-
-```bash
-sudo /usr/local/bin/xray-manager.sh
-```
-
-سپس:
-1. **گزینه 1**: نصب Xray Core
-2. **گزینه 2**: پیکربندی VLESS + REALITY
-3. **گزینه 30** (اختیاری): بهینه‌سازی سیستم برای حداکثر عملکرد
-4. **گزینه 8**: فعال‌سازی شروع خودکار
-5. **گزینه 5**: استارت سرویس
-6. پیکربندی فایروال ارائه دهنده VPS خود (دستورالعمل‌ها ارائه شده است)
-7. **گزینه 14**: تولید کد QR برای اولین کلاینت
-
----
-
-## گزینه‌های منو (32 مورد)
-
-### نصب و راه‌اندازی (1-4)
-- 1) نصب Xray Core
-- 2) پیکربندی VLESS + REALITY
-- 3) حذف Xray
-- 4) مدیریت نسخه (نصب/تغییر/بازگشت) **جدید**
-
-### کنترل سرویس (5-9)
-- 5) شروع سرویس
-- 6) توقف سرویس
-- 7) ریستارت سرویس
-- 8) فعال‌سازی شروع خودکار
-- 9) غیرفعال‌سازی شروع خودکار
-
-### مدیریت کلاینت (10-16)
-
-<img src="UI Screenshots/QRCode Gen.png" width="600" alt="QRCode Generation">
-
-- 10) افزودن کلاینت جدید (ویزارد)
-- 11) حذف کلاینت
-- 12) لیست همه کلاینت‌ها
-- 13) نمایش اطلاعات اتصال کلاینت
-- 14) تولید کد QR
-- 15) راهنمای اتصال (Android/iOS/Desktop)
-- 16) آمار ترافیک کلاینت‌ها
-
-### لاگ‌ها و نظارت (17-20)
-- 17) مشاهده لاگ‌ها
-- 18) ذخیره لاگ‌ها در فایل
-- 19) پاک کردن لاگ‌ها
-- 20) وضعیت دقیق سیستم
-
-### پیکربندی (21-23)
-- 21) بکاپ‌گیری از پیکربندی
-- 22) بازیابی پیکربندی
-- 23) مشاهده کانفیگ فعلی
-
-### سیستم و پیشرفته (24-28)
-- 24) حذف سیستم‌های VPN قدیمی (WireGuard/Caddy/wstunnel)
-- 25) راهنمای ادمین (توضیحات اجزا)
-- 26) اجرای عیب‌یابی سیستم
-- 27) بررسی و تعمیر کلید خصوصی
-- 28) تست امنیت و نشت DPI
-
-### عملکرد و ابزارهای انبوه (29-32) **جدید**
-- 29) بنچمارک سرور و توصیه‌ها
-- 30) بهینه‌سازی سیستم برای حداکثر عملکرد
-- 31) تولید کننده کانفیگ انبوه (انبوه + کدهای QR)
-- 32) حذف کننده انبوه کلاینت
-
-### انتقال و صادرات (33-35) **جدید**
-- 33) صادرات کلاینت‌ها (برای انتقال VPS)
-- 34) وارد کردن کلاینت‌ها (از فایل صادراتی)
-- 35) تولید کد QR برای همه کلاینت‌ها
-
----
-
-## ویژگی‌های پیشرفته
-
-### مدیریت نسخه
-
-تغییر بین هر نسخه Xray Core:
-
-```bash
-sudo ./xray-manager.sh switch-version 25.10.15
-```
-
-یا استفاده از منوی تعاملی (گزینه 4):
-- نصب نسخه خاص
-- بکاپ خودکار قبل از تغییر
-- بازگشت به نسخه قبلی
-- همه کلاینت‌ها معتبر باقی می‌مانند
-
-### تولید کانفیگ انبوه
-
-تولید 1 تا 1000 کانفیگ کلاینت در چند ثانیه:
-- گزینه منو 31
-- نام‌گذاری خودکار (PREFIX_001, PREFIX_002, etc.)
-- کدهای QR PNG برای هر کلاینت
-- گالری تصویری HTML
-- لیست کامل لینک‌های VLESS
-
-### بهینه‌سازی سیستم
-
-فعال‌سازی BBR + تنظیم شبکه + محدودیت‌های توصیف‌گر فایل:
-- گزینه منو 30
-- بهبود 2 تا 3 برابری پهنای باند با BBR
-- بافرهای شبکه 64MB برای اتصالات با تاخیر بالا
-- پشتیبانی از 1 میلیون توصیف‌گر فایل
-- چک‌لیست تایید 10 نقطه‌ای
-- ریستارت نرم با شمارش معکوس
-
-### بنچمارک سرور
-
-تحلیل قابلیت‌های سرور شما:
-- گزینه منو 29
-- تحلیل CPU/حافظه/دیسک/شبکه
-- طبقه‌بندی سطح عملکرد
-- توصیه‌های اتصال همزمان
-- بررسی وضعیت بهینه‌سازی
-
-### انتقال VPS
-
-انتقال بدون دردسر کلاینت‌ها به VPS جدید:
-- گزینه منو 33: صادرات کلاینت‌ها (فقط نام‌ها، فرمت قابل حمل)
-- گزینه منو 34: وارد کردن کلاینت‌ها (UUID‌های جدید تولید می‌شوند)
-- گزینه منو 35: تولید کد QR برای همه کلاینت‌های وارد شده
-- گالری HTML با همه کدهای QR برای توزیع آسان
-
----
-
-## ساختار فایل
-
-پس از اجرای اسکریپت، موارد زیر را خواهید داشت:
-
-```
-/usr/local/bin/xray-manager.sh          # Main script
-/usr/local/bin/xray                      # Xray binary
-/usr/local/etc/xray/
-├── config.json                          # Main Xray config
-├── clients.json                         # Client registry
-├── public_key.txt                       # REALITY public key
-├── sni.txt                              # SNI/server name
-├── port.txt                             # Listening port
-├── server_name.txt                      # Friendly hostname
-├── versions/                            # Version backups
-├── backups/                             # Config backups
-└── benchmark_results.json               # Performance data (NEW)
-
-/etc/systemd/system/xray.service                # Service unit
-/etc/systemd/system/xray.service.d/override.conf  # Limits override
-/etc/sysctl.d/99-xray-performance.conf           # Kernel tuning (NEW)
-/etc/security/limits.d/99-xray-performance.conf  # File limits (NEW)
-
-/var/log/xray/
-├── access.log                           # Connection log
-└── error.log                            # Error log
-```
-
----
-
-## پیکربندی (Configuration)
-
-<img src="UI Screenshots/Configuration.png" width="800" alt="Configuration">
-
-### فایل‌های اصلی پیکربندی
-
-**`/usr/local/etc/xray/config.json`**
-- پیکربندی ورودی VLESS + REALITY
-- قوانین مسیریابی خروجی
-- پیکربندی لاگ‌ها
-
-**`/usr/local/etc/xray/clients.json`**
-- ثبت کلاینت‌ها (uuid, email, shortId, created, mass_generated)
-- استفاده شده توسط اسکریپت برای مدیریت کلاینت
-
-**فایل‌های وضعیت کمکی:**
-- `public_key.txt` — کلید عمومی REALITY
-- `sni.txt` — SNI/نام سرور
-- `port.txt` — پورت شنود
-- `server_name.txt` — نام دوستانه
-
-### بهینه‌سازی عملکرد (جدید)
-
-وقتی گزینه 30 را اجرا می‌کنید، اسکریپت موارد زیر را تنظیم می‌کند:
-
-**کنترل ازدحام BBR**
-- `net.ipv4.tcp_congestion_control = bbr`
-- `net.core.default_qdisc = fq`
-- انتظار: بهبود 2 تا 3 برابری پهنای باند
-
-**بافرهای شبکه**
-- `net.core.rmem_max = 67108864` (64MB)
-- `net.core.wmem_max = 67108864` (64MB)
-- عالی برای اتصالات با تاخیر بالا
-
-**محدودیت‌های توصیف‌گر فایل**
-- `fs.file-max = 2097152`
-- پشتیبانی از بیش از 1 میلیون اتصال همزمان
-
-**محدودیت‌های Systemd**
-- `DefaultLimitNOFILE=1048576`
-- محدودیت‌های سرویس و هر کاربر
-
----
-
-## جریان‌های کاری رایج
-
-### افزودن یک کلاینت تکی
-
-1. منو → گزینه 10 (Add new client)
-2. وارد کردن برچسب/ایمیل (یا پذیرش پیش‌فرض)
-3. اسکریپت UUID + Short ID را تولید می‌کند
-4. دریافت لینک VLESS و کد QR
-
-### تولید انبوه 100 کلاینت
-
-1. منو → گزینه 31 (Mass Config Generator)
-2. وارد کردن نام پایه (مثلاً "TRIAL")
-3. وارد کردن تعداد (100)
-4. خروجی: `~/xray_mass_TRIAL_TIMESTAMP/`
-   - `qrcodes/` — کدهای QR PNG
-   - `configs/` — فایل‌های کانفیگ متنی
-   - `index.html` — گالری تصویری
-   - `configs_list.txt` — همه لینک‌های VLESS
-
-### حذف ایمن 50 کلاینت
-
-1. منو → گزینه 32 (Mass Client Remover)
-2. انتخاب روش حذف:
-   - با الگو: `TRIAL_*`
-   - با محدوده: `TRIAL_001` تا `TRIAL_050`
-   - تعاملی: انتخاب از لیست
-3. تایید حذف
-4. تمام!
-
-### تغییر نسخه Xray
-
-1. منو → گزینه 4 (Version Management)
-2. گزینه 1: نصب/تغییر نسخه
-3. انتخاب نسخه (مثلاً 25.10.15)
-4. اسکریپت:
-   - از نسخه فعلی بکاپ می‌گیرد
-   - نسخه جدید را دانلود می‌کند
-   - تمام کلاینت‌ها را حفظ می‌کند
-   - سرویس را ریستارت می‌کند
-
-### بهینه‌سازی عملکرد سیستم
-
-1. منو → گزینه 30 (Optimize System)
-2. بررسی بهینه‌سازی‌ها
-3. اسکریپت BBR + تنظیمات + محدودیت‌ها را اعمال می‌کند
-4. اگر نیاز به ریبوت باشد:
-   - شمارش معکوس 10 ثانیه‌ای
-   - برای لغو Ctrl+C را فشار دهید
-   - اتصال SSH مجدداً در حدود 30 ثانیه برقرار می‌شود
-
----
-
-## عیب‌یابی (Troubleshooting)
-
-### کلاینت نمی‌تواند متصل شود
-**شایع‌ترین دلیل: فایروال!**
-1. فایروال ارائه دهنده VPS را بررسی کنید (Hetzner, DigitalOcean, etc.)
-2. فایروال محلی را بررسی کنید: `ss -tlnp | grep xray`
-3. اجرای گزینه 26 (Diagnostics)
-4. اجرای گزینه 28 (DPI Test)
-
-### سرویس استارت نمی‌شود
-1. اجرای گزینه 26 (System Diagnostics)
-2. بررسی لاگ‌ها: `journalctl -u xray -n 50`
-3. اعتبارسنجی کانفیگ: `xray -test -c /usr/local/etc/xray/config.json`
-
-### عملکرد کند
-1. اجرای گزینه 29 (Server Benchmark)
-2. اجرای گزینه 30 (System Optimization)
-3. بررسی فعال بودن BBR: `sysctl net.ipv4.tcp_congestion_control`
-4. امتحان کردن مقصد SNI متفاوت
-
-### پس از تغییر نسخه‌ها
-- همیشه کدهای QR را مجدداً تولید کنید (گزینه 14)
-- همه کلاینت‌ها معتبر باقی می‌مانند
-- نیازی به پیکربندی مجدد نیست
-
----
+<pre dir="ltr"><code>sudo xray-manager.sh status
+sudo xray-manager.sh diagnostics
+sudo xray-manager.sh add-client
+sudo xray-manager.sh list-clients
+sudo xray-manager.sh qr
+sudo xray-manager.sh qr-all
+sudo xray-manager.sh export-clients
+sudo xray-manager.sh import-clients
+sudo xray-manager.sh versions</code></pre>
 
 ## نکات امنیتی
 
-- اسکریپت به عنوان **root** اجرا می‌شود — فقط به چیزی که بررسی می‌کنید اعتماد کنید
-- محافظت از فایل‌های حساس:
-  - `config.json`
-  - `clients.json`
-  - `public_key.txt`
-- لینک‌های VLESS را به صورت عمومی به اشتراک نگذارید
-- کلاینت‌ها/کلیدها را به صورت دوره‌ای تغییر دهید
-- بکاپ‌ها به صورت خودکار برای عملیات‌های اصلی ایجاد می‌شوند
-
----
-
-## نیازمندی‌های سیستم
-
-- **سیستم عامل:** Debian/Ubuntu با systemd
-- **شبکه:** آدرس IPv4 عمومی
-- **ابزارها:** bash, curl, wget, unzip, jq, qrencode, net-tools, bc
-
-اسکریپت وابستگی‌های گمشده را به صورت خودکار نصب می‌کند.
-
----
-
-## تغییرات (Changelog)
-
-### نسخه 2.1 (فوریه 2026)
-- ✨ انتقال VPS: صادرات کلاینت‌ها برای انتقال بدون دردسر سرور
-- ✨ انتقال VPS: وارد کردن کلاینت‌ها با تولید خودکار UUID
-- ✨ تولید کننده انبوه کد QR برای همه کلاینت‌های موجود
-- ✨ خروجی گالری HTML برای توزیع انبوه کد QR
-- 🔧 منو به 35 گزینه گسترش یافت
-
-### نسخه 2.0 (فوریه 2026)
-- ✨ مدیریت نسخه (نصب/تغییر/بازگشت)
-- ✨ تولید کننده کانفیگ انبوه (1 تا 1000 کانفیگ)
-- ✨ حذف کننده انبوه کلاینت (الگو/محدوده/تعاملی)
-- ✨ بهینه‌سازی عملکرد سیستم (BBR + تیونینگ)
-- ✨ بنچمارک سرور و توصیه‌ها
-- 🔧 ریستارت نرم با شمارش معکوس
-- 🔧 چک‌لیست تایید 10 نقطه‌ای
-- 🐛 رفع توالی‌های فرار رنگ در منوها
-
-### نسخه 1.0 (انتشار اولیه)
-- هسته اصلی: نصب، پیکربندی، افزودن/حذف کلاینت
-- تولید کد QR، مدیریت سرویس
-- تست‌های امنیتی DPI، راهنمای اتصال
-
----
-
-## پشتیبانی و راهنما
-
-1. اجرای **گزینه 26**: عیب‌یابی سیستم (System Diagnostics)
-2. اجرای **گزینه 28**: تست امنیت و DPI
-3. ذخیره لاگ‌ها: **گزینه 18**
-4. بررسی `/var/log/xray/error.log`
-
-برای راهنمایی دقیق، اجرا کنید: **گزینه 25** (راهنمای ادمین)
-
----
-
-## لایسنس
-
-این پروژه در حال حاضر هیچ لایسنس صریحی ندارد. در صورت نیاز تغییر دهید و توزیع کنید، با ذکر منبع مناسب.
+- این اسکریپت با دسترسی روت اجرا می‌شود؛ قبل از اجرا آن را بررسی کنید.
+- فایل‌های <code dir="ltr">config.json</code>، <code dir="ltr">clients.json</code>، کلیدهای خصوصی، لینک‌ها و QRها را عمومی منتشر نکنید.
+- لینک VLESS و QR دسترسی مستقیم به پروکسی شما ایجاد می‌کنند.
+- قبل از تغییر فایروال، مطمئن شوید دسترسی SSH شما حفظ می‌شود.
+- قبل از تغییرات مهم از مسیر <code dir="ltr">/usr/local/etc/xray</code> بکاپ بگیرید.
 
 </div>
