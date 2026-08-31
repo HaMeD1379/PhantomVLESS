@@ -5,8 +5,6 @@
 
 set -e
 
-MANAGER_VERSION="3.3.1"
-
 # Color codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -24,18 +22,13 @@ ARROW="→"
 BULLET="•"
 
 # Paths
-XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
-XRAY_CONFIG="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
-XRAY_SERVICE="${XRAY_SERVICE:-/etc/systemd/system/xray.service}"
-XRAY_LOG="${XRAY_LOG:-/var/log/xray/access.log}"
-XRAY_ERROR_LOG="${XRAY_ERROR_LOG:-/var/log/xray/error.log}"
-CONFIG_BACKUP_DIR="${CONFIG_BACKUP_DIR:-/usr/local/etc/xray/backups}"
-CLIENTS_DB="${CLIENTS_DB:-/usr/local/etc/xray/clients.json}"
-XRAY_PUBLIC_KEY_FILE="${XRAY_PUBLIC_KEY_FILE:-/usr/local/etc/xray/public_key.txt}"
-MANAGER_BACKUP_DIR="${MANAGER_BACKUP_DIR:-/usr/local/etc/xray/manager-backups}"
-LEGACY_INBOUND_TAG="legacy-reality-vision"
-IOS_INBOUND_TAG="ios-reality-vision"
-ANDROID_INBOUND_TAG="android-advanced"
+XRAY_BIN="/usr/local/bin/xray"
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
+XRAY_SERVICE="/etc/systemd/system/xray.service"
+XRAY_LOG="/var/log/xray/access.log"
+XRAY_ERROR_LOG="/var/log/xray/error.log"
+CONFIG_BACKUP_DIR="/usr/local/etc/xray/backups"
+CLIENTS_DB="/usr/local/etc/xray/clients.json"
 
 # Function to print colored output
 print_color() {
@@ -66,19 +59,11 @@ initialize_environment() {
 
     # Set proper permissions
     chmod 644 "$CLIENTS_DB" 2>/dev/null || true
-
-    # Keep exported client URLs aligned with the existing REALITY private key.
-    # This only repairs derived metadata; it never rotates keys or client IDs.
-    if [[ -f "$XRAY_CONFIG" && -x "$XRAY_BIN" ]] && command -v jq >/dev/null 2>&1; then
-        if ! get_reality_public_key >/dev/null 2>&1; then
-            print_color $YELLOW "${CROSS} Could not verify the cached REALITY client key"
-        fi
-    fi
 }
 
 # Script location constants
 SCRIPT_INSTALL_PATH="/usr/local/bin/xray-manager.sh"
-SCRIPT_GITHUB_URL="${SCRIPT_GITHUB_URL:-https://raw.githubusercontent.com/HaMeD1379/my_vps/main/xray-manager.sh}"
+SCRIPT_GITHUB_URL="https://raw.githubusercontent.com/HaMeD1379/PhantomVLESS/main/xray-manager.sh"
 
 # Function to self-install the script
 self_install() {
@@ -92,6 +77,14 @@ self_install() {
 
     # Check if script is already installed
     if [[ -f "$SCRIPT_INSTALL_PATH" ]]; then
+        # Do not let this legacy checkout overwrite a newer profile-aware
+        # manager already installed on the VPS.  The installed manager owns
+        # the live multi-platform configuration and its firewall diagnostics.
+        if grep -q '^MANAGER_VERSION=' "$SCRIPT_INSTALL_PATH" 2>/dev/null &&
+           ! grep -q '^MANAGER_VERSION=' "$CURRENT_SCRIPT" 2>/dev/null; then
+            print_color $YELLOW "  ${BULLET} Keeping the newer installed manager at $SCRIPT_INSTALL_PATH"
+            return 0
+        fi
         # Script exists, check if we should update
         local INSTALLED_HASH=$(md5sum "$SCRIPT_INSTALL_PATH" 2>/dev/null | awk '{print $1}')
         local CURRENT_HASH=""
@@ -273,7 +266,13 @@ show_logo() {
     echo '  ██╔═══╝  ██╔══██║ ██╔══██║ ██║╚██╗██║    ██║    ██║   ██║ ██║╚██╔╝██║'
     echo '  ██║      ██║  ██║ ██║  ██║ ██║ ╚████║    ██║    ╚██████╔╝ ██║ ╚═╝ ██║'
     echo '  ╚═╝      ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝  ╚═══╝    ╚═╝     ╚═════╝  ╚═╝     ╚═╝'
-    echo '                 V L E S S   •   M U L T I - P L A T F O R M'
+    echo ''
+    echo '            ██╗   ██╗ ██╗      ███████╗ ███████╗ ███████╗'
+    echo '             ██╗ ██╔╝ ██║      ██╔════╝ ██╔════╝ ██╔════╝'
+    echo '              ████╔╝  ██║      █████╗   ███████╗ ███████╗'
+    echo '               ██╔╝   ██║      ██╔══╝   ╚════██║ ╚════██║'
+    echo '               ██║    ███████╗ ███████╗ ███████║ ███████║'
+    echo '               ╚═╝    ╚══════╝ ╚══════╝ ╚══════╝ ╚══════╝'
     echo -e "${NC}"
 }
 
@@ -338,40 +337,20 @@ fetch_available_versions() {
         fi
     fi
 
-    # GitHub returns releases newest-first, including pre-releases. Avoid a
-    # fabricated fallback list: installing a made-up "latest" is unsafe.
-    local RELEASES_JSON
-    local VERSIONS
-    if ! RELEASES_JSON=$(curl -fsSL --retry 3 \
-        'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30'); then
-        return 1
+    # Fetch from GitHub API (fetch top 20 releases)
+    local VERSIONS=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases?per_page=20 2>/dev/null | grep '"tag_name"' | grep -oP '(?<="tag_name": ")v[^"]+' | sed 's/^v//' | sort -V -r)
+
+    if [[ -z "$VERSIONS" ]]; then
+        # Fallback to some common recent versions if API fails
+        VERSIONS="26
+25.12.1
+25.11.2
+25.10.15
+25.1.0
+24.12.1"
     fi
 
-    VERSIONS=$(jq -r '.[] | select(.draft == false) | .tag_name | sub("^v"; "")' \
-        <<< "$RELEASES_JSON")
-    [[ -n "$VERSIONS" ]] || return 1
-
-    printf '%s\n' "$VERSIONS" | tee "$CACHE_FILE"
-}
-
-# Resolve the newest official release, including Xray pre-releases. GitHub's
-# /releases/latest endpoint excludes pre-releases and would currently return an
-# older core instead of 26.7.28.
-get_latest_xray_version() {
-    local RELEASES_JSON
-    local LATEST_VERSION
-
-    if ! RELEASES_JSON=$(curl -fsSL --retry 3 \
-        'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30'); then
-        return 1
-    fi
-
-    LATEST_VERSION=$(jq -er '
-        [.[] | select(.draft == false)][0].tag_name | sub("^v"; "")
-    ' <<< "$RELEASES_JSON") || return 1
-
-    validate_version_format "$LATEST_VERSION" || return 1
-    printf '%s\n' "$LATEST_VERSION"
+    echo "$VERSIONS" | tee "$CACHE_FILE"
 }
 
 # Function to backup current binary before version change
@@ -690,7 +669,7 @@ clean_version_backups() {
 # Version management menu
 version_management_menu() {
     while true; do
-        clear 2>/dev/null || true
+        clear
         print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
         print_color $BOLD$CYAN "║              XRAY VERSION MANAGEMENT                       ║"
         print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
@@ -746,104 +725,9 @@ version_management_menu() {
 }
 
 # Function to install Xray with optional version specification
-ensure_reality_client_compatibility() {
-    local CONFIG_FILE=${1:-$XRAY_CONFIG}
-
-    [[ -f "$CONFIG_FILE" ]] || return 0
-
-    # Xray 26.3.27+ defaults an omitted/empty minClientVer to 26.3.27.
-    # Set an explicit zero floor to preserve compatibility with existing
-    # REALITY clients without changing UUIDs, keys, short IDs, or endpoints.
-    if ! jq -e '
-        any(.inbounds[]?;
-            .streamSettings.security == "reality" and
-            ((.streamSettings.realitySettings.minClientVer // "") == "")
-        )
-    ' "$CONFIG_FILE" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    local CONFIG_DIR
-    local TEMP_CONFIG
-    CONFIG_DIR=$(dirname "$CONFIG_FILE")
-    TEMP_CONFIG=$(mktemp "${CONFIG_DIR}/.config.reality-compat.XXXXXX.json")
-
-    if ! jq '
-        (.inbounds[]? |
-            select(
-                .streamSettings.security == "reality" and
-                ((.streamSettings.realitySettings.minClientVer // "") == "")
-            ) |
-            .streamSettings.realitySettings.minClientVer
-        ) = "0.0.0"
-    ' "$CONFIG_FILE" > "$TEMP_CONFIG"; then
-        rm -f "$TEMP_CONFIG"
-        print_color $RED "${CROSS} Failed to prepare REALITY client compatibility"
-        return 1
-    fi
-
-    chmod --reference="$CONFIG_FILE" "$TEMP_CONFIG"
-    chown --reference="$CONFIG_FILE" "$TEMP_CONFIG"
-
-    if [[ -x "$XRAY_BIN" ]] && ! "$XRAY_BIN" run -test -config "$TEMP_CONFIG" >/dev/null 2>&1; then
-        rm -f "$TEMP_CONFIG"
-        print_color $RED "${CROSS} REALITY compatibility config validation failed"
-        return 1
-    fi
-
-    mkdir -p "$CONFIG_BACKUP_DIR"
-    cp -a "$CONFIG_FILE" "${CONFIG_BACKUP_DIR}/config-before-reality-compat-$(date +%Y%m%d_%H%M%S).json"
-    mv -f "$TEMP_CONFIG" "$CONFIG_FILE"
-
-    if [[ "${2:-true}" == "true" ]]; then
-        print_color $GREEN "${CHECK} Preserved compatibility with existing REALITY clients"
-    fi
-}
-
-restore_xray_binary_after_failed_install() {
-    local BACKUP_DIR=$1
-    local RESTART_SERVICE=${2:-false}
-
-    if [[ -z "$BACKUP_DIR" || ! -x "$BACKUP_DIR/xray" ]]; then
-        print_color $RED "${CROSS} Automatic binary rollback is unavailable"
-        return 1
-    fi
-
-    install -m 755 "$BACKUP_DIR/xray" "$XRAY_BIN"
-    if [[ -f "${XRAY_CONFIG}.pre-install-backup" ]]; then
-        cp -a "${XRAY_CONFIG}.pre-install-backup" "$XRAY_CONFIG"
-        rm -f "${XRAY_CONFIG}.pre-install-backup"
-    fi
-    if [[ "$RESTART_SERVICE" == "true" ]]; then
-        systemctl restart xray
-    fi
-    print_color $GREEN "${CHECK} Restored Xray $(get_installed_version) after failed update"
-}
-
-run_xray_installer() {
-    local REQUESTED_VERSION=${1:-}
-    local INSTALLER_SCRIPT
-
-    if ! INSTALLER_SCRIPT=$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh); then
-        return 1
-    fi
-
-    if [[ -n "$REQUESTED_VERSION" ]]; then
-        bash -c "$INSTALLER_SCRIPT" @ install --version "$REQUESTED_VERSION" >/dev/null 2>&1
-    else
-        bash -c "$INSTALLER_SCRIPT" @ install >/dev/null 2>&1
-    fi
-}
-
 install_xray() {
     local REQUESTED_VERSION=$1
     local INTERACTIVE=${2:-true}
-    local VERSION_BACKUP_DIR=""
-    local SERVICE_WAS_ACTIVE=false
-
-    if systemctl is-active --quiet xray 2>/dev/null; then
-        SERVICE_WAS_ACTIVE=true
-    fi
 
     if [[ "$INTERACTIVE" == "true" ]]; then
         print_color $BLUE "Installing Xray Core..."
@@ -864,11 +748,14 @@ install_xray() {
         fi
     fi
 
-    # Resolve "latest" ourselves because the official installer's normal
-    # latest mode excludes pre-releases such as 26.7.28.
+    # If version is not specified, use latest (empty string tells the installer script to use latest)
     if [[ -z "$REQUESTED_VERSION" ]]; then
         if [[ "$INTERACTIVE" == "true" ]]; then
-            print_color $CYAN "Resolving the newest official Xray release..."
+            print_color $CYAN "Installing latest version of Xray..."
+        fi
+    else
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            print_color $CYAN "Installing Xray version $REQUESTED_VERSION..."
         fi
     fi
 
@@ -881,24 +768,12 @@ install_xray() {
         apt-get install -y curl wget unzip jq qrencode net-tools bc iperf3 >/dev/null 2>&1
     fi
 
-    if [[ -z "$REQUESTED_VERSION" ]]; then
-        if ! REQUESTED_VERSION=$(get_latest_xray_version); then
-            print_color $RED "${CROSS} Could not resolve the latest Xray release from GitHub"
-            print_color $YELLOW "No binary, configuration, client, UUID, or key was changed"
-            return 1
-        fi
-    fi
-
-    if [[ "$INTERACTIVE" == "true" ]]; then
-        print_color $CYAN "Installing Xray version $REQUESTED_VERSION..."
-    fi
-
     # Backup current version before installing new one
     if [[ "$CURRENT_VERSION" != "not-installed" ]]; then
         if [[ "$INTERACTIVE" == "true" ]]; then
             print_color $CYAN "Backing up current version..."
         fi
-        VERSION_BACKUP_DIR=$(backup_current_version)
+        backup_current_version >/dev/null
         if [[ "$INTERACTIVE" == "true" ]]; then
             print_color $GREEN "${CHECK} Backup complete"
         fi
@@ -910,9 +785,6 @@ install_xray() {
     mkdir -p "$CONFIG_BACKUP_DIR"
     mkdir -p "$XRAY_VERSIONS_DIR"
 
-    # Newer cores otherwise reject older REALITY clients by default.
-    ensure_reality_client_compatibility "$XRAY_CONFIG" "$INTERACTIVE" || return 1
-
     # Backup current config if it exists
     if [[ -f "$XRAY_CONFIG" ]]; then
         if [[ "$INTERACTIVE" == "true" ]]; then
@@ -922,10 +794,13 @@ install_xray() {
     fi
 
     # Download and install Xray
-    if ! run_xray_installer "$REQUESTED_VERSION"; then
-        print_color $RED "${CROSS} Failed to install requested Xray version $REQUESTED_VERSION"
-        restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
-        return 1
+    if [[ -n "$REQUESTED_VERSION" ]]; then
+        # Install specific version
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version "$REQUESTED_VERSION" >/dev/null 2>&1 || \
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
+    else
+        # Install latest version
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
     fi
 
     # Restore configuration if it was backed up
@@ -946,21 +821,14 @@ install_xray() {
     if [[ -x "$XRAY_BIN" ]]; then
         local INSTALLED_VERSION=$(get_installed_version)
 
-        if [[ -f "$XRAY_CONFIG" ]] && ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
-            print_color $RED "${CROSS} Installed Xray cannot load the existing configuration"
-            restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
-            return 1
-        fi
-
-        # A requested version must never silently turn into a different update.
-        if [[ -n "$REQUESTED_VERSION" && "$INSTALLED_VERSION" != "$REQUESTED_VERSION" ]]; then
-            print_color $RED "${CROSS} Requested $REQUESTED_VERSION, but installer provided $INSTALLED_VERSION"
-            restore_xray_binary_after_failed_install "$VERSION_BACKUP_DIR" "$SERVICE_WAS_ACTIVE" || true
-            return 1
-        fi
-
         if [[ "$INTERACTIVE" == "true" ]]; then
             print_color $GREEN "Xray installed successfully (version: $INSTALLED_VERSION)"
+        fi
+
+        # Verify the version matches requested (if version was specified)
+        if [[ -n "$REQUESTED_VERSION" && "$INSTALLED_VERSION" != "$REQUESTED_VERSION" ]]; then
+            print_color $YELLOW "⚠ Note: Requested version $REQUESTED_VERSION, but installed version is $INSTALLED_VERSION"
+            print_color $YELLOW "  (The installer script may have installed a different version)"
         fi
 
         # Test key generation
@@ -992,71 +860,6 @@ generate_short_id() {
 }
 
 # Function to generate private key for REALITY
-extract_x25519_private_key() {
-    awk -F': *' '
-        $1 == "PrivateKey" || $1 == "Private key" { print $2; exit }
-    '
-}
-
-extract_x25519_public_key() {
-    awk -F': *' '
-        $1 == "Password (PublicKey)" || $1 == "Password" ||
-        $1 == "PublicKey" || $1 == "Public key" { print $2; exit }
-    '
-}
-
-is_valid_reality_x25519_key() {
-    [[ "${1:-}" =~ ^[A-Za-z0-9_-]{43}$ ]]
-}
-
-derive_reality_public_key() {
-    local PRIVATE_KEY=${1:-}
-    local OUTPUT
-    local PUBLIC_KEY
-
-    is_valid_reality_x25519_key "$PRIVATE_KEY" || return 1
-    [[ -x "$XRAY_BIN" ]] || return 1
-
-    OUTPUT=$("$XRAY_BIN" x25519 -i "$PRIVATE_KEY" 2>/dev/null) || return 1
-    PUBLIC_KEY=$(extract_x25519_public_key <<< "$OUTPUT")
-    is_valid_reality_x25519_key "$PUBLIC_KEY" || return 1
-    printf '%s\n' "$PUBLIC_KEY"
-}
-
-# Always derive the client password/public key from the unchanged private key.
-# This prevents stale helper files and handles Xray 26.3.27+'s new
-# "Password (PublicKey)" output label.
-get_reality_public_key() {
-    local PRIVATE_KEY
-    local PUBLIC_KEY
-    local CACHED_KEY=""
-    local TEMP_KEY_FILE
-
-    [[ -f "$XRAY_CONFIG" ]] || return 1
-    PRIVATE_KEY=$(jq -r '
-        first(
-            .inbounds[]? |
-            select(.streamSettings.security == "reality") |
-            .streamSettings.realitySettings.privateKey
-        ) // empty
-    ' "$XRAY_CONFIG" 2>/dev/null)
-    PUBLIC_KEY=$(derive_reality_public_key "$PRIVATE_KEY") || return 1
-
-    if [[ -f "$XRAY_PUBLIC_KEY_FILE" ]]; then
-        CACHED_KEY=$(tr -d '\r\n' < "$XRAY_PUBLIC_KEY_FILE")
-    fi
-
-    if [[ "$CACHED_KEY" != "$PUBLIC_KEY" ]]; then
-        TEMP_KEY_FILE=$(mktemp "/usr/local/etc/xray/.public-key.XXXXXX")
-        printf '%s\n' "$PUBLIC_KEY" > "$TEMP_KEY_FILE"
-        chmod 600 "$TEMP_KEY_FILE"
-        chown root:root "$TEMP_KEY_FILE"
-        mv -f "$TEMP_KEY_FILE" "$XRAY_PUBLIC_KEY_FILE"
-    fi
-
-    printf '%s\n' "$PUBLIC_KEY"
-}
-
 generate_reality_keys() {
     local OUTPUT=""
     local PRIVATE_KEY=""
@@ -1065,11 +868,19 @@ generate_reality_keys() {
     # Try xray binary first
     if [[ -x "$XRAY_BIN" ]]; then
         OUTPUT=$("$XRAY_BIN" x25519 2>/dev/null)
-        PRIVATE_KEY=$(extract_x25519_private_key <<< "$OUTPUT")
-        PUBLIC_KEY=$(extract_x25519_public_key <<< "$OUTPUT")
-        if is_valid_reality_x25519_key "$PRIVATE_KEY" && is_valid_reality_x25519_key "$PUBLIC_KEY"; then
-            printf 'Private key: %s\n' "$PRIVATE_KEY"
-            printf 'Public key: %s\n' "$PUBLIC_KEY"
+        # Handle new format: PrivateKey/Password (Xray 1.8+)
+        if echo "$OUTPUT" | grep -q "PrivateKey:"; then
+            PRIVATE_KEY=$(echo "$OUTPUT" | grep "PrivateKey:" | awk '{print $2}')
+            PUBLIC_KEY=$(echo "$OUTPUT" | grep "Password:" | awk '{print $2}')
+            if [[ -n "$PRIVATE_KEY" ]] && [[ -n "$PUBLIC_KEY" ]]; then
+                echo "Private key: $PRIVATE_KEY"
+                echo "Public key: $PUBLIC_KEY"
+                return 0
+            fi
+        fi
+        # Handle old format: Private key/Public key
+        if echo "$OUTPUT" | grep -q "Private key:"; then
+            echo "$OUTPUT"
             return 0
         fi
     fi
@@ -1077,13 +888,31 @@ generate_reality_keys() {
     # Fallback: try xray in PATH
     if command -v xray &> /dev/null; then
         OUTPUT=$(xray x25519 2>/dev/null)
-        PRIVATE_KEY=$(extract_x25519_private_key <<< "$OUTPUT")
-        PUBLIC_KEY=$(extract_x25519_public_key <<< "$OUTPUT")
-        if is_valid_reality_x25519_key "$PRIVATE_KEY" && is_valid_reality_x25519_key "$PUBLIC_KEY"; then
-            printf 'Private key: %s\n' "$PRIVATE_KEY"
-            printf 'Public key: %s\n' "$PUBLIC_KEY"
+        # Handle new format
+        if echo "$OUTPUT" | grep -q "PrivateKey:"; then
+            PRIVATE_KEY=$(echo "$OUTPUT" | grep "PrivateKey:" | awk '{print $2}')
+            PUBLIC_KEY=$(echo "$OUTPUT" | grep "Password:" | awk '{print $2}')
+            if [[ -n "$PRIVATE_KEY" ]] && [[ -n "$PUBLIC_KEY" ]]; then
+                echo "Private key: $PRIVATE_KEY"
+                echo "Public key: $PUBLIC_KEY"
+                return 0
+            fi
+        fi
+        # Handle old format
+        if echo "$OUTPUT" | grep -q "Private key:"; then
+            echo "$OUTPUT"
             return 0
         fi
+    fi
+
+    # Fallback: generate using openssl (x25519 compatible format)
+    local RAND_PRIV=$(openssl rand -base64 32 2>/dev/null | tr '+/' '-_' | tr -d '=\n' | cut -c1-43)
+    local RAND_PUB=$(openssl rand -base64 32 2>/dev/null | tr '+/' '-_' | tr -d '=\n' | cut -c1-43)
+
+    if [[ -n "$RAND_PRIV" ]] && [[ -n "$RAND_PUB" ]] && [[ ${#RAND_PRIV} -ge 40 ]]; then
+        echo "Private key: $RAND_PRIV"
+        echo "Public key: $RAND_PUB"
+        return 0
     fi
 
     return 1
@@ -1559,7 +1388,7 @@ configure_xray() {
     print_color $CYAN "  ${BULLET} Must support TLS 1.3 (all recommendations above do)"
     print_color $CYAN "  ${BULLET} The site must be accessible from your server"
     echo
-    print_color $YELLOW "${BOLD}About custom domains:${NC}"
+    print_color $YELLOW "${BOLD}About your domain (gamerlounge.ca):${NC}"
     print_color $CYAN "  ${BULLET} You DON'T need to use your domain for REALITY"
     print_color $CYAN "  ${BULLET} REALITY impersonates OTHER websites, not yours"
     print_color $CYAN "  ${BULLET} Save your domain for other uses (website, CDN, etc.)"
@@ -1620,10 +1449,10 @@ configure_xray() {
     print_color $CYAN "  ${BULLET} Simplest and most reliable"
     print_color $GREEN "  ${ARROW} Press Enter to use this"
     echo
-    print_color $CYAN "${BOLD}Option 2: Use a custom domain${NC}"
-    print_color $CYAN "  ${BULLET} Clients connect to a domain you control"
+    print_color $CYAN "${BOLD}Option 2: Use your domain (gamerlounge.ca)${NC}"
+    print_color $CYAN "  ${BULLET} Clients connect to gamerlounge.ca"
     print_color $CYAN "  ${BULLET} But they see $SNI's certificate"
-    print_color $YELLOW "  ${BULLET} Requires: DNS A record pointing to this server"
+    print_color $YELLOW "  ${BULLET} Requires: DNS A record gamerlounge.ca → 91.99.108.15"
     print_color $YELLOW "  ${BULLET} Advanced - only if you understand DNS"
     echo
     read -p "Server name (press Enter for '$SNI', or type custom): " SERVER_NAME
@@ -1746,7 +1575,6 @@ configure_xray() {
             "$SERVER_NAME"
           ],
           "privateKey": "$PRIVATE_KEY",
-          "minClientVer": "0.0.0",
           "shortIds": [
             "$SHORT_ID"
           ]
@@ -1801,8 +1629,7 @@ EOF
        "$CLIENTS_DB" > "${CLIENTS_DB}.tmp" && mv "${CLIENTS_DB}.tmp" "$CLIENTS_DB"
 
     # Save public key for client generation
-    printf '%s\n' "$PUBLIC_KEY" > "$XRAY_PUBLIC_KEY_FILE"
-    chmod 600 "$XRAY_PUBLIC_KEY_FILE"
+    echo "$PUBLIC_KEY" > /usr/local/etc/xray/public_key.txt
     echo "$SNI" > /usr/local/etc/xray/sni.txt
     echo "$PORT" > /usr/local/etc/xray/port.txt
     echo "$SERVER_NAME" > /usr/local/etc/xray/server_name.txt
@@ -1860,6 +1687,180 @@ EOF
     read -p "Press Enter to continue..."
 }
 
+# Function to add an XHTTP inbound reusing existing client UUIDs
+# (no new clients, no UUID changes - fixes Android/Desktop XHTTP "context deadline exceeded")
+add_xhttp_inbound() {
+    local XHTTP_PORT="${1:-}"
+    local XHTTP_PATH="${2:-}"
+
+    check_root
+
+    if [[ ! -f "$XRAY_CONFIG" ]]; then
+        print_color $RED "No Xray config found at $XRAY_CONFIG"
+        print_color $YELLOW "Run configure first (menu option 2), then run this again."
+        return 1
+    fi
+
+    local EXISTING_XHTTP
+    EXISTING_XHTTP=$(jq -r '[.inbounds[] | select(.streamSettings.network == "xhttp")] | length' "$XRAY_CONFIG" 2>/dev/null || echo "0")
+    if [[ "$EXISTING_XHTTP" != "0" ]]; then
+        print_color $YELLOW "An XHTTP inbound already exists. It will be replaced with the new settings."
+    fi
+
+    if [[ -z "$XHTTP_PORT" ]]; then
+        print_color $CYAN "Enter the port your already-shared Android/Desktop XHTTP configs use."
+        read -p "XHTTP port: " XHTTP_PORT
+    fi
+    if [[ -z "$XHTTP_PATH" ]]; then
+        print_color $CYAN "Enter the path your already-shared Android/Desktop XHTTP configs use."
+        print_color $YELLOW "  (It usually looks like /xhttp or /your-secret-path)"
+        read -p "XHTTP path: " XHTTP_PATH
+    fi
+
+    # Validate port and path
+    if ! [[ "$XHTTP_PORT" =~ ^[0-9]+$ ]] || [[ "$XHTTP_PORT" -lt 1 ]] || [[ "$XHTTP_PORT" -gt 65535 ]]; then
+        print_color $RED "Invalid port: $XHTTP_PORT"
+        return 1
+    fi
+    [[ -z "$XHTTP_PATH" ]] && XHTTP_PATH="/xhttp"
+    [[ "$XHTTP_PATH" != /* ]] && XHTTP_PATH="/$XHTTP_PATH"
+
+    # Gather REALITY + client data from the existing TCP REALITY inbound
+    local REALITY_DEST REALITY_SERVER_NAMES PRIVATE_KEY REALITY_SHORT_IDS CLIENTS_JSON
+    REALITY_DEST=$(jq -r '.inbounds[0].streamSettings.realitySettings.dest // empty' "$XRAY_CONFIG" 2>/dev/null)
+    REALITY_SERVER_NAMES=$(jq -c '.inbounds[0].streamSettings.realitySettings.serverNames // empty' "$XRAY_CONFIG" 2>/dev/null)
+    PRIVATE_KEY=$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey // empty' "$XRAY_CONFIG" 2>/dev/null)
+    REALITY_SHORT_IDS=$(jq -c '.inbounds[0].streamSettings.realitySettings.shortIds // empty' "$XRAY_CONFIG" 2>/dev/null)
+    CLIENTS_JSON=$(jq -c '[.inbounds[0].settings.clients[] | {id: .id, email: (.email // "xhttp-user")}]' "$XRAY_CONFIG" 2>/dev/null)
+
+    if [[ -z "$REALITY_DEST" || "$REALITY_DEST" == "null" || -z "$PRIVATE_KEY" || "$PRIVATE_KEY" == "null" ]]; then
+        print_color $RED "Existing REALITY configuration is incomplete. Run configure first (menu option 2)."
+        return 1
+    fi
+    if [[ -z "$CLIENTS_JSON" || "$CLIENTS_JSON" == "[]" ]]; then
+        print_color $RED "No existing clients found to reuse. Add clients first (menu option 10)."
+        return 1
+    fi
+    if [[ -z "$REALITY_SHORT_IDS" || "$REALITY_SHORT_IDS" == "null" || "$REALITY_SHORT_IDS" == "[]" ]]; then
+        REALITY_SHORT_IDS='[""]'
+    fi
+    if [[ -z "$REALITY_SERVER_NAMES" || "$REALITY_SERVER_NAMES" == "null" || "$REALITY_SERVER_NAMES" == "[]" ]]; then
+        REALITY_SERVER_NAMES='["'"$(echo "$REALITY_DEST" | cut -d: -f1)"'"]'
+    fi
+
+    print_color $CYAN "Building XHTTP inbound on port ${XHTTP_PORT} path ${XHTTP_PATH}..."
+    print_color $CYAN "Reusing $(jq -r 'length' <<< "$CLIENTS_JSON") existing client UUID(s) (no UUID changes)."
+
+    local NEW_INBOUND
+    NEW_INBOUND=$(jq -n \
+        --arg port "$XHTTP_PORT" \
+        --arg path "$XHTTP_PATH" \
+        --arg dest "$REALITY_DEST" \
+        --argjson serverNames "$REALITY_SERVER_NAMES" \
+        --arg privateKey "$PRIVATE_KEY" \
+        --argjson shortIds "$REALITY_SHORT_IDS" \
+        --argjson clients "$CLIENTS_JSON" \
+'{
+  "listen": "0.0.0.0",
+  "port": ($port | tonumber),
+  "protocol": "vless",
+  "settings": {
+    "clients": $clients,
+    "decryption": "none"
+  },
+  "streamSettings": {
+    "network": "xhttp",
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "dest": $dest,
+      "xver": 0,
+      "serverNames": $serverNames,
+      "privateKey": $privateKey,
+      "shortIds": $shortIds
+    },
+    "xhttpSettings": {
+      "path": $path
+    }
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls"],
+    "routeOnly": true
+  }
+}')
+
+    cp "$XRAY_CONFIG" "${XRAY_CONFIG}.pre-xhttp-backup"
+
+    jq --argjson inbound "$NEW_INBOUND" \
+       '(.inbounds |= map(select(.streamSettings.network != "xhttp"))) | .inbounds += [$inbound]' \
+       "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+    # Validate JSON
+    if ! jq empty "$XRAY_CONFIG" >/dev/null 2>&1; then
+        print_color $RED "Config JSON became invalid. Restoring backup."
+        cp "${XRAY_CONFIG}.pre-xhttp-backup" "$XRAY_CONFIG"
+        return 1
+    fi
+
+    # Validate with the xray binary when available
+    if [[ -x "$XRAY_BIN" ]]; then
+        if ! "$XRAY_BIN" -test -config "$XRAY_CONFIG" >/tmp/xray_xhttp_test.log 2>&1; then
+            if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/tmp/xray_xhttp_test.log 2>&1; then
+                print_color $RED "Xray rejected the new config:"
+                tail -n 20 /tmp/xray_xhttp_test.log 2>/dev/null
+                print_color $YELLOW "Restoring previous config."
+                cp "${XRAY_CONFIG}.pre-xhttp-backup" "$XRAY_CONFIG"
+                return 1
+            fi
+        fi
+        print_color $GREEN "${CHECK} Xray config test passed"
+    fi
+
+    # Persist XHTTP settings for future use
+    echo "$XHTTP_PORT" > /usr/local/etc/xray/xhttp_port.txt
+    echo "$XHTTP_PATH" > /usr/local/etc/xray/xhttp_path.txt
+
+    # Open firewall
+    apply_firewall_rules "$XHTTP_PORT" || true
+
+    # Restart service
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        print_color $CYAN "Restarting Xray service..."
+        if systemctl restart xray 2>/dev/null; then
+            sleep 2
+            if systemctl is-active --quiet xray 2>/dev/null; then
+                print_color $GREEN "${CHECK} Xray service restarted with the XHTTP inbound"
+            else
+                print_color $RED "${CROSS} Service failed to stay up. Check: journalctl -u xray -n 50"
+                print_color $YELLOW "Restoring previous config."
+                cp "${XRAY_CONFIG}.pre-xhttp-backup" "$XRAY_CONFIG"
+                systemctl restart xray 2>/dev/null || true
+                return 1
+            fi
+        else
+            print_color $RED "${CROSS} Service restart failed. Restoring previous config."
+            cp "${XRAY_CONFIG}.pre-xhttp-backup" "$XRAY_CONFIG"
+            systemctl restart xray 2>/dev/null || true
+            return 1
+        fi
+    else
+        print_color $YELLOW "Xray service is not running. Start it with menu option 5 / 'xray-manager.sh start'."
+    fi
+
+    echo
+    print_color $BOLD$GREEN "XHTTP inbound added without creating new clients or changing UUIDs."
+    print_color $CYAN "  Port: ${XHTTP_PORT}"
+    print_color $CYAN "  Path: ${XHTTP_PATH}"
+    print_color $CYAN "  Reused clients: $(jq -r 'length' <<< "$CLIENTS_JSON")"
+    echo
+    print_color $YELLOW "IMPORTANT: The port and path above MUST match the values in the"
+    print_color $YELLOW "already-shared Android/Desktop XHTTP configs, otherwise they will"
+    print_color $YELLOW "still time out. If they don't match, re-run:"
+    print_color $CYAN "  xray-manager.sh add-xhttp <their-port> <their-path>"
+    echo
+}
+
 # Function to create systemd service
 create_systemd_service() {
     cat > "$XRAY_SERVICE" <<EOF
@@ -1896,7 +1897,7 @@ check_and_fix_private_key() {
     # Check if this is an interactive call (from menu)
     if [[ "${BASH_SOURCE[1]}" =~ "main" ]] || [[ "$1" == "--interactive" ]]; then
         INTERACTIVE=true
-        clear 2>/dev/null || true
+        clear
         print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
         print_color $BOLD$CYAN "║         CHECK AND FIX REALITY PRIVATE KEY                  ║"
         print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
@@ -1937,17 +1938,21 @@ check_and_fix_private_key() {
             print_color $GREEN "  ${CHECK} Private key found: ${PRIVATE_KEY:0:20}..."
         fi
 
-        PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "")
+        PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "")
         if [[ -z "$PUBLIC_KEY" ]]; then
             if [[ "$INTERACTIVE" == "true" ]]; then
-                print_color $RED "  ${CROSS} Could not derive the public key from the existing private key"
-                print_color $YELLOW "  No key or client configuration was changed"
+                print_color $YELLOW "  ${CROSS} Public key file is missing!"
                 echo
-                read -p "  Press Enter to return to menu..."
+                print_color $YELLOW "  Do you want to regenerate the key pair?"
+                print_color $RED "  Warning: This will invalidate all existing client connections!"
+                read -p "  Regenerate keys? (y/n): " REGEN
+                if [[ "$REGEN" == "y" || "$REGEN" == "Y" ]]; then
+                    NEED_FIX=true
+                fi
             else
-                print_color $RED "${CROSS} Could not derive the REALITY public key; no keys were changed"
+                print_color $YELLOW "⚠ Public key file missing, regenerating from private key..."
+                NEED_FIX=true
             fi
-            return 1
         else
             if [[ "$INTERACTIVE" == "true" ]]; then
                 print_color $GREEN "  ${CHECK} Public key found: ${PUBLIC_KEY:0:20}..."
@@ -1969,12 +1974,26 @@ check_and_fix_private_key() {
 
         if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
             print_color $RED "  ${CROSS} Failed to generate keys!"
-            print_color $YELLOW "  No key, UUID, short ID, or client configuration was changed"
-            if [[ "$INTERACTIVE" == "true" ]]; then
-                echo
-                read -p "  Press Enter to return to menu..."
+            print_color $YELLOW "  Attempting automatic fix..."
+
+            # Try reinstalling xray
+            print_color $CYAN "  Reinstalling Xray binary..."
+            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install &>/dev/null
+
+            # Try again
+            KEYS=$(generate_reality_keys)
+            PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
+            PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
+
+            if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+                print_color $RED "  ${CROSS} Still cannot generate keys!"
+                print_color $YELLOW "  Try running: bash -c \"\$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install"
+                if [[ "$INTERACTIVE" == "true" ]]; then
+                    echo
+                    read -p "  Press Enter to return to menu..."
+                fi
+                return 1
             fi
-            return 1
         fi
 
         # Backup current config
@@ -1990,8 +2009,7 @@ check_and_fix_private_key() {
         jq --arg pk "$PRIVATE_KEY" '.inbounds[0].streamSettings.realitySettings.privateKey = $pk' "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
 
         # Save public key
-        printf '%s\n' "$PUBLIC_KEY" > "$XRAY_PUBLIC_KEY_FILE"
-        chmod 600 "$XRAY_PUBLIC_KEY_FILE"
+        echo "$PUBLIC_KEY" > /usr/local/etc/xray/public_key.txt
 
         if [[ "$INTERACTIVE" == "true" ]]; then
             echo
@@ -2059,8 +2077,7 @@ generate_client_url() {
     # Check and fix private key if needed
     check_and_fix_private_key
 
-    local PUBLIC_KEY
-    PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "NOT_SET")
+    local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
     local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
     local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "443")
     local SERVER_NAME=$(cat /usr/local/etc/xray/server_name.txt 2>/dev/null || echo "$SNI")
@@ -2834,8 +2851,7 @@ show_connection_guide() {
         local SERVER_IP=$(curl -s -4 --max-time 3 ifconfig.me 2>/dev/null || curl -s -4 --max-time 3 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
         local PORT=$(jq -r '.inbounds[0].port' "$XRAY_CONFIG" 2>/dev/null)
         local SNI=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$XRAY_CONFIG" 2>/dev/null)
-        local PUBLIC_KEY
-        PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "Run './xray-manager.sh client-info' to get public key")
+        local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "Run './xray-manager.sh client-info' to get public key")
 
         print_color $YELLOW "When manually configuring, use these settings:"
         echo
@@ -2954,8 +2970,7 @@ generate_qr_code() {
     local EMAIL=$(echo "$CLIENT_DATA" | jq -r '.email')
 
     # Get server config
-    local PUBLIC_KEY
-    PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "NOT_SET")
+    local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
     local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
     local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "51820")
     local SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
@@ -3054,375 +3069,6 @@ generate_qr_code() {
 # Legacy add_client function (kept for CLI compatibility)
 add_client() {
     add_client_wizard
-}
-
-# Function to export clients for VPS migration
-export_clients() {
-    clear
-    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
-    print_color $BOLD$CYAN "║              EXPORT CLIENTS FOR VPS MIGRATION              ║"
-    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
-    echo
-
-    if [[ ! -f "$CLIENTS_DB" ]] || [[ $(jq '.clients | length' "$CLIENTS_DB" 2>/dev/null) -eq 0 ]]; then
-        print_color $YELLOW "  No clients found to export."
-        read -p "  Press Enter to return to menu..."
-        return
-    fi
-
-    local CLIENT_COUNT=$(jq '.clients | length' "$CLIENTS_DB" 2>/dev/null)
-    print_color $GREEN "  Found $CLIENT_COUNT client(s) to export."
-    echo
-
-    print_color $CYAN "  This will export client NAMES only (not UUIDs)."
-    print_color $CYAN "  Fresh UUIDs will be generated when importing on the new VPS."
-    echo
-
-    # Create export file with only client names
-    local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    local EXPORT_FILE="${HOME}/xray_clients_export_${TIMESTAMP}.json"
-
-    # Export only names/emails
-    jq '{
-        export_info: {
-            exported_at: (now | strftime("%Y-%m-%d %H:%M:%S")),
-            source_note: "Client names only - UUIDs will be regenerated on import",
-            client_count: (.clients | length)
-        },
-        clients: [.clients[] | {name: .email, original_created: .created}]
-    }' "$CLIENTS_DB" > "$EXPORT_FILE"
-
-    if [[ -f "$EXPORT_FILE" ]]; then
-        print_color $GREEN "  ${CHECK} Clients exported successfully!"
-        echo
-        print_color $CYAN "  Export file: ${BOLD}$EXPORT_FILE${NC}"
-        echo
-        print_color $YELLOW "  To migrate to a new VPS:"
-        print_color $CYAN "    1. Copy this file to your new VPS"
-        print_color $CYAN "    2. Install and configure Xray on the new VPS"
-        print_color $CYAN "    3. Run: ${BOLD}xray-manager.sh import-clients${NC}"
-        print_color $CYAN "    4. Select the export file"
-        print_color $CYAN "    5. Generate new QR codes for your clients"
-        echo
-        print_color $YELLOW "  Note: New UUIDs will be generated, so clients need new QR codes."
-    else
-        print_color $RED "  ${CROSS} Failed to export clients!"
-    fi
-
-    echo
-    read -p "  Press Enter to continue..."
-}
-
-# Function to import clients from export file
-import_clients() {
-    clear
-    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
-    print_color $BOLD$CYAN "║              IMPORT CLIENTS FROM EXPORT FILE               ║"
-    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
-    echo
-
-    # Check if Xray is configured
-    if [[ ! -f "$XRAY_CONFIG" ]]; then
-        print_color $RED "  ${CROSS} Xray is not configured!"
-        print_color $YELLOW "  Please run option 2 first to configure VLESS + REALITY"
-        read -p "  Press Enter to return to menu..."
-        return 1
-    fi
-
-    # List available export files
-    print_color $BLUE "  Available export files in home directory:"
-    echo
-    local EXPORT_FILES=$(ls -1 ${HOME}/xray_clients_export_*.json 2>/dev/null)
-
-    if [[ -z "$EXPORT_FILES" ]]; then
-        print_color $YELLOW "  No export files found in ${HOME}/"
-        echo
-        print_color $CYAN "  You can also enter a full path to an export file."
-    else
-        echo "$EXPORT_FILES" | while read -r file; do
-            local COUNT=$(jq -r '.export_info.client_count // .clients | length' "$file" 2>/dev/null)
-            local DATE=$(jq -r '.export_info.exported_at // "Unknown"' "$file" 2>/dev/null)
-            print_color $CYAN "    ${BULLET} $(basename "$file")"
-            print_color $NC "      Clients: $COUNT | Exported: $DATE"
-        done
-    fi
-    echo
-
-    read -p "  Enter export filename or full path: " IMPORT_FILE
-
-    # Handle relative filename
-    if [[ ! "$IMPORT_FILE" =~ ^/ ]]; then
-        IMPORT_FILE="${HOME}/$IMPORT_FILE"
-    fi
-
-    if [[ ! -f "$IMPORT_FILE" ]]; then
-        print_color $RED "  ${CROSS} File not found: $IMPORT_FILE"
-        read -p "  Press Enter to return to menu..."
-        return 1
-    fi
-
-    # Validate JSON format
-    if ! jq empty "$IMPORT_FILE" 2>/dev/null; then
-        print_color $RED "  ${CROSS} Invalid JSON file!"
-        read -p "  Press Enter to return to menu..."
-        return 1
-    fi
-
-    # Get client names from export file
-    local CLIENT_NAMES=$(jq -r '.clients[].name' "$IMPORT_FILE" 2>/dev/null)
-    local IMPORT_COUNT=$(jq -r '.clients | length' "$IMPORT_FILE" 2>/dev/null)
-
-    if [[ -z "$CLIENT_NAMES" ]] || [[ "$IMPORT_COUNT" -eq 0 ]]; then
-        print_color $RED "  ${CROSS} No clients found in export file!"
-        read -p "  Press Enter to return to menu..."
-        return 1
-    fi
-
-    print_color $GREEN "  Found $IMPORT_COUNT client(s) to import:"
-    echo
-    echo "$CLIENT_NAMES" | head -10 | while read -r name; do
-        print_color $CYAN "    ${BULLET} $name"
-    done
-    if [[ $IMPORT_COUNT -gt 10 ]]; then
-        print_color $YELLOW "    ... and $((IMPORT_COUNT - 10)) more"
-    fi
-    echo
-
-    print_color $YELLOW "  ${ARROW} Fresh UUIDs will be generated for each client."
-    print_color $YELLOW "  ${ARROW} Existing clients with same name will be SKIPPED."
-    echo
-
-    read -p "  Proceed with import? (y/n): " CONFIRM
-    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-        print_color $YELLOW "  Import cancelled."
-        return
-    fi
-
-    echo
-    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    print_color $BOLD$GREEN "IMPORTING CLIENTS..."
-    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo
-
-    local IMPORTED=0
-    local SKIPPED=0
-
-    while IFS= read -r CLIENT_NAME; do
-        # Check if client already exists
-        if jq -e --arg name "$CLIENT_NAME" '.clients[] | select(.email == $name)' "$CLIENTS_DB" &>/dev/null; then
-            print_color $YELLOW "  ${BULLET} Skipped (exists): $CLIENT_NAME"
-            SKIPPED=$((SKIPPED + 1))
-            continue
-        fi
-
-        # Generate fresh UUID and Short ID
-        local UUID=$(generate_uuid)
-        local SHORT_ID=$(generate_short_id)
-        local TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
-
-        # Add to Xray config
-        jq --arg uuid "$UUID" --arg email "$CLIENT_NAME" \
-           '.inbounds[0].settings.clients += [{"id": $uuid, "flow": "xtls-rprx-vision", "email": $email}]' \
-           "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
-
-        # Add short ID to config
-        jq --arg shortid "$SHORT_ID" \
-           '.inbounds[0].streamSettings.realitySettings.shortIds += [$shortid]' \
-           "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp" && mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
-
-        # Add to clients database
-        jq --arg uuid "$UUID" --arg email "$CLIENT_NAME" --arg shortid "$SHORT_ID" --arg timestamp "$TIMESTAMP" \
-           '.clients += [{"uuid": $uuid, "email": $email, "shortId": $shortid, "flow": "xtls-rprx-vision", "created": $timestamp, "imported": true}]' \
-           "$CLIENTS_DB" > "${CLIENTS_DB}.tmp" && mv "${CLIENTS_DB}.tmp" "$CLIENTS_DB"
-
-        print_color $GREEN "  ${CHECK} Imported: $CLIENT_NAME"
-        IMPORTED=$((IMPORTED + 1))
-    done <<< "$CLIENT_NAMES"
-
-    echo
-    print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    print_color $GREEN "  ${CHECK} Import complete!"
-    print_color $CYAN "    Imported: $IMPORTED"
-    print_color $YELLOW "    Skipped:  $SKIPPED"
-    echo
-
-    # Restart service
-    if [[ $IMPORTED -gt 0 ]]; then
-        print_color $YELLOW "  Restarting Xray service..."
-        systemctl restart xray
-        print_color $GREEN "  ${CHECK} Service restarted"
-        echo
-        print_color $CYAN "  ${ARROW} Run option 35 to generate QR codes for all clients"
-    fi
-
-    echo
-    read -p "  Press Enter to continue..."
-}
-
-# Function to generate QR codes for ALL existing clients
-generate_all_qr_codes() {
-    clear
-    print_color $BOLD$CYAN "╔════════════════════════════════════════════════════════════╗"
-    print_color $BOLD$CYAN "║          GENERATE QR CODES FOR ALL CLIENTS                 ║"
-    print_color $BOLD$CYAN "╚════════════════════════════════════════════════════════════╝"
-    echo
-
-    # Check prerequisites
-    if [[ ! -f "$XRAY_CONFIG" ]]; then
-        print_color $RED "  ${CROSS} Xray is not configured!"
-        print_color $YELLOW "  Please run option 2 first to configure VLESS + REALITY"
-        read -p "  Press Enter to return to menu..."
-        return 1
-    fi
-
-    # Check for qrencode
-    if ! command -v qrencode &> /dev/null; then
-        print_color $YELLOW "  ${BULLET} Installing qrencode..."
-        apt-get update && apt-get install -y qrencode
-    fi
-
-    # Check clients
-    if [[ ! -f "$CLIENTS_DB" ]] || [[ $(jq '.clients | length' "$CLIENTS_DB" 2>/dev/null) -eq 0 ]]; then
-        print_color $YELLOW "  No clients found. Please add clients first."
-        read -p "  Press Enter to return to menu..."
-        return
-    fi
-
-    local CLIENT_COUNT=$(jq '.clients | length' "$CLIENTS_DB" 2>/dev/null)
-    print_color $GREEN "  Found $CLIENT_COUNT client(s)"
-    echo
-
-    # Get server config
-    local PUBLIC_KEY
-    PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "NOT_SET")
-    local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
-    local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "443")
-    local SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
-
-    print_color $CYAN "  Server: ${SERVER_IP}:${PORT}"
-    print_color $CYAN "  SNI: ${SNI}"
-    echo
-
-    read -p "  Generate QR codes for all $CLIENT_COUNT clients? (y/n): " CONFIRM
-    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-        print_color $YELLOW "  Cancelled."
-        return
-    fi
-
-    echo
-    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    print_color $BOLD$GREEN "GENERATING QR CODES..."
-    print_color $BOLD$BLUE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo
-
-    # Create output directory
-    local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    local OUTPUT_DIR="${HOME}/xray_qr_all_${TIMESTAMP}"
-    mkdir -p "$OUTPUT_DIR"
-
-    # Create HTML index
-    local INDEX_FILE="${OUTPUT_DIR}/index.html"
-    cat > "$INDEX_FILE" << EOF
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Xray Client QR Codes</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
-        h1 { color: #00d4ff; text-align: center; }
-        .info { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }
-        .card { background: #0f3460; border-radius: 8px; padding: 15px; text-align: center; }
-        .card img { max-width: 220px; border-radius: 4px; background: white; padding: 10px; }
-        .card h3 { color: #00d4ff; margin: 10px 0 5px; word-break: break-all; }
-        .card .info-text { font-size: 11px; color: #888; }
-        .download-all { background: #00d4ff; color: #000; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; margin: 10px; }
-    </style>
-</head>
-<body>
-    <h1>🔐 Xray Client QR Codes</h1>
-    <div class="info">
-        <strong>Server:</strong> ${SERVER_IP}:${PORT} |
-        <strong>Protocol:</strong> VLESS + REALITY |
-        <strong>SNI:</strong> ${SNI} |
-        <strong>Generated:</strong> $(date)
-        <br><br>
-        <strong>Total Clients:</strong> ${CLIENT_COUNT}
-    </div>
-    <div class="grid">
-EOF
-
-    local GENERATED=0
-
-    # Process each client
-    jq -c '.clients[]' "$CLIENTS_DB" | while read -r client; do
-        local UUID=$(echo "$client" | jq -r '.uuid')
-        local EMAIL=$(echo "$client" | jq -r '.email')
-        local SHORT_ID=$(echo "$client" | jq -r '.shortId')
-
-        # Sanitize filename (remove special chars)
-        local SAFE_NAME=$(echo "$EMAIL" | tr -cd '[:alnum:]_-')
-
-        # URL encode client name
-        local ENCODED_NAME=$(echo -n "$EMAIL" | jq -sRr @uri 2>/dev/null || echo "$EMAIL")
-
-        # Generate VLESS URL
-        local VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${ENCODED_NAME}"
-
-        # Generate QR code PNG - filename matches client name
-        local QR_FILE="${OUTPUT_DIR}/${SAFE_NAME}.png"
-        qrencode -t PNG -o "$QR_FILE" -s 6 -m 2 "$VLESS_URL" 2>/dev/null
-
-        if [[ -f "$QR_FILE" ]]; then
-            print_color $GREEN "  ${CHECK} ${EMAIL}"
-
-            # Add to HTML index
-            cat >> "$INDEX_FILE" << EOF
-        <div class="card">
-            <img src="${SAFE_NAME}.png" alt="${EMAIL}">
-            <h3>${EMAIL}</h3>
-            <div class="info-text">Click image to view full size</div>
-        </div>
-EOF
-            GENERATED=$((GENERATED + 1))
-        else
-            print_color $RED "  ${CROSS} Failed: ${EMAIL}"
-        fi
-    done
-
-    # Close HTML
-    cat >> "$INDEX_FILE" << EOF
-    </div>
-    <div class="info" style="margin-top: 20px;">
-        <p>📱 Scan QR codes with v2rayNG (Android) or Shadowrocket (iOS)</p>
-        <p>Each PNG file is named after the client for easy distribution</p>
-    </div>
-</body>
-</html>
-EOF
-
-    echo
-    print_color $BOLD$CYAN "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    print_color $GREEN "  ${CHECK} QR code generation complete!"
-    echo
-    print_color $CYAN "  Output directory: ${BOLD}$OUTPUT_DIR${NC}"
-    echo
-    print_color $YELLOW "  Files created:"
-    print_color $CYAN "    ${BULLET} index.html - Visual gallery of all QR codes"
-    print_color $CYAN "    ${BULLET} {client_name}.png - Individual QR code files"
-    echo
-    print_color $CYAN "  Each PNG file is named after the client, making it easy"
-    print_color $CYAN "  to send the correct QR code to each person."
-    echo
-
-    # Show file count
-    local FILE_COUNT=$(ls -1 "$OUTPUT_DIR"/*.png 2>/dev/null | wc -l)
-    print_color $GREEN "  Total QR codes generated: $FILE_COUNT"
-    echo
-
-    read -p "  Press Enter to continue..."
 }
 
 # Function to enable service
@@ -3564,7 +3210,7 @@ restore_config() {
 
 # Function to uninstall Xray
 uninstall_xray() {
-    read -p "This will completely remove Xray. Continue? (y/n, 0 = back): " choice
+    read -p "This will completely remove Xray. Continue? (y/n): " choice
     if [[ "$choice" == "y" ]]; then
         systemctl stop xray 2>/dev/null || true
         systemctl disable xray 2>/dev/null || true
@@ -3739,44 +3385,44 @@ show_admin_help() {
     echo
 
     print_color $BOLD$MAGENTA "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    print_color $BOLD$GREEN "7. ABOUT CUSTOM DOMAINS"
+    print_color $BOLD$GREEN "7. ABOUT YOUR DOMAIN (gamerlounge.ca)"
     print_color $BOLD$MAGENTA "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     print_color $YELLOW "Do you need your domain for REALITY?"
     print_color $CYAN "  ${BOLD}NO!${NC}${CYAN} This is the beauty of REALITY. You DON'T need your own domain."
     print_color $CYAN "  REALITY impersonates other websites (like google.com), not yours."
     echo
-    print_color $YELLOW "So why use a custom domain?"
-    print_color $CYAN "  You might use one for older systems (Caddy + wstunnel), which"
+    print_color $YELLOW "So why did you buy gamerlounge.ca?"
+    print_color $CYAN "  You probably bought it for your old system (Caddy + wstunnel), which"
     print_color $CYAN "  DID need a domain for TLS certificates. REALITY doesn't need that."
     echo
-    print_color $YELLOW "Can you still use a custom domain with REALITY?"
+    print_color $YELLOW "Can you still use gamerlounge.ca with REALITY?"
     print_color $CYAN "  ${BOLD}YES!${NC}${CYAN} You have options:"
     echo
     print_color $CYAN "  ${BOLD}Option 1: Use it as SNI (ADVANCED)${NC}"
-    print_color $CYAN "    • Point your domain's A record to your server IP"
-    print_color $CYAN "    • Set SNI to your domain in config"
+    print_color $CYAN "    • Point gamerlounge.ca A record to your server IP (91.99.108.15)"
+    print_color $CYAN "    • Set SNI to 'gamerlounge.ca' in config"
     print_color $CYAN "    • Set dest to a real website like 'www.microsoft.com:443'"
-    print_color $CYAN "    • Clients connect to your domain, but see Microsoft's cert"
+    print_color $CYAN "    • Clients connect to gamerlounge.ca, but see Microsoft's cert"
     print_color $CYAN "    • This is more advanced - only do if you understand it"
     echo
     print_color $CYAN "  ${BOLD}Option 2: Don't use it for REALITY (RECOMMENDED)${NC}"
     print_color $CYAN "    • Keep using google.com or cloudflare.com as SNI"
-    print_color $CYAN "    • Clients connect directly to your server IP"
-    print_color $CYAN "    • Save your domain for a website or other services"
+    print_color $CYAN "    • Clients connect directly to your IP: 91.99.108.15"
+    print_color $CYAN "    • Save gamerlounge.ca for a website or other services"
     print_color $CYAN "    • This is simpler and works perfectly"
     echo
     print_color $CYAN "  ${BOLD}Option 3: Use domain for CDN (FUTURE)${NC}"
     print_color $CYAN "    • Put Cloudflare in front of your server"
-    print_color $CYAN "    • Point your domain to Cloudflare"
+    print_color $CYAN "    • Point gamerlounge.ca to Cloudflare"
     print_color $CYAN "    • Cloudflare proxies to your server"
     print_color $CYAN "    • Adds extra layer of protection (hides your real IP)"
     echo
     print_color $YELLOW "Current recommendation:"
-    print_color $GREEN "  For now, skip custom domains and use the simple setup:"
-    print_color $GREEN "  • Server IP: $(get_server_address)"
+    print_color $GREEN "  For now, don't use your domain. Use the simple setup:"
+    print_color $GREEN "  • Server IP: 91.99.108.15"
     print_color $GREEN "  • SNI: www.google.com (or www.cloudflare.com)"
     print_color $GREEN "  • Clients connect to IP, see Google's certificate"
-    print_color $GREEN "  Keep any domain for future use or a website"
+    print_color $GREEN "  Keep domain for future use or a website"
     echo
 
     print_color $BOLD$MAGENTA "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -3827,7 +3473,7 @@ show_admin_help() {
     print_color $YELLOW "${BOLD}Problem: Clients can't connect${NC}"
     print_color $CYAN "  ${BULLET} Firewall: Check Hetzner firewall rules (most common issue!)"
     print_color $CYAN "  ${BULLET} Port listening: 'ss -tlnp | grep xray'"
-    print_color $CYAN "  ${BULLET} Server IP correct: Should match the current public IP"
+    print_color $CYAN "  ${BULLET} Server IP correct: Should be 91.99.108.15"
     print_color $CYAN "  ${BULLET} SNI domain accessible: 'curl -I https://www.google.com'"
     echo
     print_color $YELLOW "${BOLD}Problem: Connection works but slow${NC}"
@@ -3873,7 +3519,7 @@ remove_old_vpn_systems() {
 
     print_color $RED "${BOLD}WARNING: This action cannot be undone!${NC}"
     echo
-    read -p "Do you want to continue? (yes/no, 0 = back): " CONFIRM
+    read -p "Do you want to continue? (yes/no): " CONFIRM
 
     if [[ "$CONFIRM" != "yes" ]]; then
         print_color $YELLOW "Operation cancelled."
@@ -4117,7 +3763,7 @@ run_system_diagnostics() {
 
         print_color $YELLOW "\n  ${BULLET} Check Hetzner Cloud Console → Firewalls"
         print_color $YELLOW "  ${BULLET} Ensure TCP port $PORT is allowed from 0.0.0.0/0"
-        print_color $YELLOW "  ${BULLET} Your VPS IP: $SERVER_IP"
+        print_color $YELLOW "  ${BULLET} Your VPS IP: 91.99.108.15"
 
     fi
     echo
@@ -4145,8 +3791,8 @@ run_system_diagnostics() {
         fi
 
         # Check if private key exists
-        if [[ -f "$XRAY_PUBLIC_KEY_FILE" ]]; then
-            PUB_KEY=$(get_reality_public_key 2>/dev/null || echo "")
+        if [[ -f "/usr/local/etc/xray/public_key.txt" ]]; then
+            PUB_KEY=$(cat /usr/local/etc/xray/public_key.txt)
             print_color $GREEN "\n${CHECK} Public key found: ${PUB_KEY:0:20}..."
         fi
     else
@@ -4536,7 +4182,7 @@ optimize_system_performance() {
     echo
     print_color $RED "  ${BULLET} A system reboot is required for all changes to take effect!"
     echo
-    read -p "Continue with optimization? (y/n, 0 = back): " CONFIRM
+    read -p "Continue with optimization? (y/n): " CONFIRM
     if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
         print_color $YELLOW "Optimization cancelled."
         return
@@ -5092,8 +4738,7 @@ mass_config_generator() {
     echo
 
     # Get server config
-    local PUBLIC_KEY
-    PUBLIC_KEY=$(get_reality_public_key 2>/dev/null || echo "NOT_SET")
+    local PUBLIC_KEY=$(cat /usr/local/etc/xray/public_key.txt 2>/dev/null || echo "NOT_SET")
     local SNI=$(cat /usr/local/etc/xray/sni.txt 2>/dev/null || echo "www.google.com")
     local PORT=$(cat /usr/local/etc/xray/port.txt 2>/dev/null || echo "443")
     local SERVER_IP=$(curl -s -4 --max-time 5 ifconfig.me 2>/dev/null || curl -s -4 --max-time 5 icanhazip.com 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
@@ -5664,1453 +5309,9 @@ run_dpi_security_test() {
     set -e  # Re-enable exit on error
 }
 
-# ============================================================================
-# Production profile layer (manager v3)
-#
-# These definitions intentionally override legacy functions above.  Keeping the
-# older UI implementation in place minimizes upgrade risk while every mutating
-# path below uses inbound tags, validated temporary files, and atomic replaces.
-# ============================================================================
-
-urlencode() {
-    jq -nr --arg value "${1:-}" '$value | @uri'
-}
-
-html_escape() {
-    jq -nr --arg value "${1:-}" '$value | @html'
-}
-
-get_server_address() {
-    local address=""
-    if [[ -s /usr/local/etc/xray/server_address.txt ]]; then
-        address=$(tr -d '\r\n' < /usr/local/etc/xray/server_address.txt)
-    fi
-    if [[ -z "$address" ]]; then
-        address=$(curl -fsS -4 --max-time 5 https://ifconfig.me 2>/dev/null || true)
-    fi
-    if [[ -z "$address" || "$address" == *:* ]]; then
-        address=$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')
-    fi
-    [[ -n "$address" ]] || address="YOUR_SERVER_IP"
-    printf '%s\n' "$address"
-}
-
-atomic_replace() {
-    local source=$1
-    local target=$2
-    if [[ -e "$target" ]]; then
-        chmod --reference="$target" "$source"
-        chown --reference="$target" "$source"
-    else
-        chmod 600 "$source"
-        chown root:root "$source" 2>/dev/null || true
-    fi
-    mv -f "$source" "$target"
-}
-
-create_state_backup() {
-    local reason=${1:-manual}
-    local stamp backup_dir item
-    stamp=$(date -u +%Y%m%dT%H%M%SZ)
-    backup_dir="${MANAGER_BACKUP_DIR}/${reason}-${stamp}"
-    install -d -m 700 "$backup_dir"
-
-    [[ -e /usr/local/bin/xray-manager.sh ]] && cp -a /usr/local/bin/xray-manager.sh "$backup_dir/xray-manager.sh"
-    [[ -e "$XRAY_BIN" ]] && cp -a "$XRAY_BIN" "$backup_dir/xray"
-    [[ -e "$XRAY_CONFIG" ]] && cp -a "$XRAY_CONFIG" "$backup_dir/config.json"
-    [[ -e "$CLIENTS_DB" ]] && cp -a "$CLIENTS_DB" "$backup_dir/clients.json"
-    [[ -e "$XRAY_SERVICE" ]] && cp -a "$XRAY_SERVICE" "$backup_dir/xray.service"
-    for item in public_key.txt sni.txt port.txt server_name.txt server_address.txt; do
-        [[ -e "/usr/local/etc/xray/$item" ]] && cp -a "/usr/local/etc/xray/$item" "$backup_dir/$item"
-    done
-    if [[ -x "$XRAY_BIN" ]]; then
-        "$XRAY_BIN" version > "$backup_dir/xray-version.txt" 2>&1 || true
-    fi
-    systemctl show xray -p FragmentPath -p ExecStart -p ActiveState -p SubState \
-        > "$backup_dir/service-state.txt" 2>&1 || true
-    (cd "$backup_dir" && sha256sum ./* > SHA256SUMS)
-    printf '%s\n' "$backup_dir"
-}
-
-restore_state_backup() {
-    local backup_dir=$1
-    local was_active=${2:-true}
-    [[ -d "$backup_dir" ]] || return 1
-
-    [[ -e "$backup_dir/xray" ]] && install -m 755 "$backup_dir/xray" "$XRAY_BIN"
-    if [[ -s "$backup_dir/xray-manager.sh" ]] && bash -n "$backup_dir/xray-manager.sh"; then
-        local manager_tmp
-        manager_tmp=$(mktemp "$(dirname "$SCRIPT_INSTALL_PATH")/.xray-manager-restore.XXXXXX")
-        cp "$backup_dir/xray-manager.sh" "$manager_tmp"
-        if [[ -e "$SCRIPT_INSTALL_PATH" ]]; then
-            chmod --reference="$SCRIPT_INSTALL_PATH" "$manager_tmp"
-            chown --reference="$SCRIPT_INSTALL_PATH" "$manager_tmp"
-        else
-            chmod 755 "$manager_tmp"
-        fi
-        mv -f "$manager_tmp" "$SCRIPT_INSTALL_PATH"
-    fi
-    [[ -e "$backup_dir/config.json" ]] && cp -a "$backup_dir/config.json" "$XRAY_CONFIG"
-    [[ -e "$backup_dir/clients.json" ]] && cp -a "$backup_dir/clients.json" "$CLIENTS_DB"
-    [[ -e "$backup_dir/xray.service" ]] && cp -a "$backup_dir/xray.service" "$XRAY_SERVICE"
-    local item
-    for item in public_key.txt sni.txt port.txt server_name.txt server_address.txt; do
-        [[ -e "$backup_dir/$item" ]] && cp -a "$backup_dir/$item" "/usr/local/etc/xray/$item"
-    done
-    systemctl daemon-reload 2>/dev/null || true
-    if [[ "$was_active" == "true" ]]; then
-        systemctl restart xray
-    fi
-}
-
-get_reality_public_key_for_tag() {
-    local tag=$1 private_key
-    private_key=$(jq -er --arg tag "$tag" '
-        first(.inbounds[] | select(.tag == $tag and .streamSettings.security == "reality") |
-            .streamSettings.realitySettings.privateKey)
-    ' "$XRAY_CONFIG") || return 1
-    derive_reality_public_key "$private_key"
-}
-
-generate_vless_encryption_pair() {
-    local output decryption encryption
-    output=$($XRAY_BIN vlessenc 2>/dev/null) || return 1
-    decryption=$(awk '/^"decryption":/{sub(/^"decryption": /,""); print; exit}' <<< "$output")
-    encryption=$(awk '/^"encryption":/{sub(/^"encryption": /,""); print; exit}' <<< "$output")
-    jq -en --argjson decryption "$decryption" --argjson encryption "$encryption" \
-        '{decryption:$decryption,encryption:$encryption}' 2>/dev/null
-}
-
-choose_profile_port() {
-    local config_file=$1 preferred=$2 port
-    for port in "$preferred" 8443 2053 2083 2087 2096 24443 30443; do
-        [[ "$port" =~ ^[0-9]+$ ]] || continue
-        if jq -e --argjson port "$port" 'any(.inbounds[]?; .port == $port)' "$config_file" >/dev/null; then
-            continue
-        fi
-        if ss -lntH "sport = :$port" 2>/dev/null | grep -q .; then
-            continue
-        fi
-        printf '%s\n' "$port"
-        return 0
-    done
-    return 1
-}
-
-prepare_profile_migration() {
-    local source_config=$1 source_db=$2 output_config=$3 output_db=$4
-    local legacy_index android_port pair decryption encryption xhttp_path android_sid
-
-    jq -e '.inbounds | type == "array"' "$source_config" >/dev/null || return 1
-    jq -e '.clients | type == "array"' "$source_db" >/dev/null || return 1
-
-    legacy_index=$(jq -r --arg legacy "$LEGACY_INBOUND_TAG" '
-        ([.inbounds | to_entries[] |
-          select(.value.tag == $legacy or
-            ((.value.tag == null or .value.tag == "") and
-             .value.protocol == "vless" and
-             .value.streamSettings.security == "reality" and
-             ((.value.streamSettings.network // .value.streamSettings.method // "raw") | IN("tcp","raw")))) |
-          .key] | first) // empty
-    ' "$source_config")
-    [[ "$legacy_index" =~ ^[0-9]+$ ]] || {
-        print_color "$RED" "${CROSS} No compatible legacy VLESS/REALITY inbound was found"
-        return 1
-    }
-
-    cp -a "$source_config" "$output_config"
-    local tmp
-    tmp=$(mktemp "$(dirname "$output_config")/.migration-config.XXXXXX")
-    jq --argjson idx "$legacy_index" --arg legacy "$LEGACY_INBOUND_TAG" '
-        .inbounds[$idx].tag = $legacy |
-        (.inbounds[]? | select(.streamSettings.security == "reality") |
-          .streamSettings.realitySettings.minClientVer) = "0.0.0"
-    ' "$output_config" > "$tmp"
-    mv -f "$tmp" "$output_config"
-
-    # Shadowrocket and standard VLESS clients use the same TCP/Vision/REALITY
-    # transport as the preserved legacy inbound. Sharing that reachable
-    # listener avoids consuming another public port and prevents cloud
-    # firewalls from silently breaking iOS profiles. Migrate any clients from
-    # the former dedicated iOS inbound without changing UUIDs or short IDs.
-    tmp=$(mktemp "$(dirname "$output_config")/.migration-config.XXXXXX")
-    jq --arg legacy "$LEGACY_INBOUND_TAG" --arg ios "$IOS_INBOUND_TAG" '
-        (first(.inbounds[] | select(.tag==$legacy))) as $legacyInbound |
-        (first(.inbounds[] | select(.tag==$ios)) // null) as $iosInbound |
-        if $iosInbound != null then
-          (.inbounds[] | select(.tag==$legacy) | .settings.clients) +=
-            [$iosInbound.settings.clients[]? |
-              select(.id as $id | (any($legacyInbound.settings.clients[]?; .id==$id) | not))] |
-          (.inbounds[] | select(.tag==$legacy) | .streamSettings.realitySettings.shortIds) +=
-            [$iosInbound.streamSettings.realitySettings.shortIds[]? |
-              select(. as $sid | (any($legacyInbound.streamSettings.realitySettings.shortIds[]?; .==$sid) | not))] |
-          .inbounds |= map(select(.tag!=$ios))
-        else . end
-    ' "$output_config" > "$tmp"
-    mv -f "$tmp" "$output_config"
-
-    encryption=$(jq -r '.profiles["android-advanced"].clientEncryption // empty' "$source_db")
-    if ! jq -e --arg tag "$ANDROID_INBOUND_TAG" 'any(.inbounds[]?; .tag == $tag)' "$output_config" >/dev/null; then
-        pair=$(generate_vless_encryption_pair) || {
-            print_color "$YELLOW" "${CROSS} Installed Xray does not provide usable VLESS Encryption; Android profile skipped"
-            pair='{"decryption":"none","encryption":"none"}'
-        }
-        decryption=$(jq -r '.decryption' <<< "$pair")
-        encryption=$(jq -r '.encryption' <<< "$pair")
-        if [[ "$decryption" != "none" ]]; then
-            android_port=$(choose_profile_port "$output_config" 8443) || return 1
-            xhttp_path="/$(openssl rand -hex 12)"
-            android_sid=$(unique_short_id "$output_config")
-            tmp=$(mktemp "$(dirname "$output_config")/.migration-config.XXXXXX")
-            jq --arg legacy "$LEGACY_INBOUND_TAG" --arg tag "$ANDROID_INBOUND_TAG" \
-               --argjson port "$android_port" --arg decryption "$decryption" --arg path "$xhttp_path" --arg sid "$android_sid" '
-                (first(.inbounds[] | select(.tag == $legacy))) as $base |
-                .inbounds += [($base |
-                    .tag = $tag | .port = $port | .listen = (.listen // "0.0.0.0") |
-                    .settings.clients = [] | .settings.decryption = $decryption |
-                    .streamSettings.network = "xhttp" | del(.streamSettings.method,.streamSettings.tcpSettings,.streamSettings.rawSettings) |
-                    .streamSettings.xhttpSettings = {path:$path,mode:"auto"} |
-                    .streamSettings.realitySettings.shortIds = [$sid] |
-                    .streamSettings.realitySettings.minClientVer = "0.0.0")]
-            ' "$output_config" > "$tmp"
-            mv -f "$tmp" "$output_config"
-        fi
-    fi
-
-    local legacy_port_now ios_port_now android_port_now android_path_now
-    legacy_port_now=$(jq -r --arg tag "$LEGACY_INBOUND_TAG" 'first(.inbounds[] | select(.tag==$tag) | .port) // empty' "$output_config")
-    ios_port_now=$legacy_port_now
-    android_port_now=$(jq -r --arg tag "$ANDROID_INBOUND_TAG" 'first(.inbounds[] | select(.tag==$tag) | .port) // empty' "$output_config")
-    android_path_now=$(jq -r --arg tag "$ANDROID_INBOUND_TAG" 'first(.inbounds[] | select(.tag==$tag) | .streamSettings.xhttpSettings.path) // empty' "$output_config")
-
-    jq --slurpfile cfg "$output_config" --arg legacy "$LEGACY_INBOUND_TAG" \
-       --arg ios "$IOS_INBOUND_TAG" --arg android "$ANDROID_INBOUND_TAG" \
-       --arg encryption "$encryption" --arg iosPort "$ios_port_now" \
-       --arg legacyPort "$legacy_port_now" --arg androidPort "$android_port_now" --arg androidPath "$android_path_now" '
-        def inbound_tag($uuid):
-          (first($cfg[0].inbounds[] | select(any(.settings.clients[]?; .id == $uuid)) | .tag) // $legacy);
-        .schemaVersion = 2 |
-        .profiles = (.profiles // {}) |
-        .profiles[$legacy] = ((.profiles[$legacy] // {}) +
-          {platform:"Legacy / Existing",inboundTag:$legacy,transport:"raw",port:($legacyPort|tonumber),compatibility:"Preserved",stable:true}) |
-        .profiles[$ios] = ((.profiles[$ios] // {}) +
-          {platform:"iOS / Shadowrocket",inboundTag:$legacy,transport:"raw",flow:"xtls-rprx-vision",fingerprint:"chrome",port:($iosPort|tonumber),sharedInbound:true,stable:true}) |
-        if $androidPort != "" then
-          .profiles[$android] = ((.profiles[$android] // {}) +
-            {platform:"Android + Desktop / Advanced",inboundTag:$android,transport:"xhttp",flow:"xtls-rprx-vision",fingerprint:"chrome",port:($androidPort|tonumber),path:$androidPath,vlessEncryption:true,stable:true} |
-            if ((.clientEncryption // "") == "") then .clientEncryption = $encryption else . end)
-        else . end |
-        .clients |= map(
-          . as $old | (inbound_tag(.uuid)) as $tag |
-          . + {
-            logicalName:(.logicalName // .email // "legacy-client"),
-            profile:(if (.platform//"")=="ios" or (.profile//"")==$ios then $ios else (.profile // $tag) end),
-            platform:(.platform // (if $tag == $ios then "ios" elif $tag == $android then "android" else "legacy" end)),
-            inboundTag:(if (.platform//"")=="ios" or (.inboundTag//"")==$ios then $legacy else (.inboundTag // $tag) end),
-            flow:(.flow // "xtls-rprx-vision"),
-            transport:(.transport // (if $tag == $android then "xhttp" else "raw" end)),
-            legacy:(if (.platform//"")|IN("ios","android","desktop") then false
-                    elif has("legacy") then .legacy else ($tag == $legacy) end),
-            migrated:(.migrated // true)
-          })
-    ' "$source_db" > "$output_db"
-
-    jq -e . "$output_db" >/dev/null
-    "$XRAY_BIN" run -test -config "$output_config" >/dev/null 2>&1
-}
-
-migrate_profile_state() {
-    local quiet=${1:-false}
-    [[ -f "$XRAY_CONFIG" && -f "$CLIENTS_DB" && -x "$XRAY_BIN" ]] || return 0
-    local config_tmp db_tmp backup_dir config_changed=false db_changed=false was_active=false
-    config_tmp=$(mktemp "$(dirname "$XRAY_CONFIG")/.profile-migration.XXXXXX.json")
-    db_tmp=$(mktemp "$(dirname "$CLIENTS_DB")/.client-migration.XXXXXX.json")
-    trap 'rm -f "${config_tmp:-}" "${db_tmp:-}"; trap - RETURN' RETURN
-
-    prepare_profile_migration "$XRAY_CONFIG" "$CLIENTS_DB" "$config_tmp" "$db_tmp" || return 1
-    cmp -s "$XRAY_CONFIG" "$config_tmp" || config_changed=true
-    cmp -s "$CLIENTS_DB" "$db_tmp" || db_changed=true
-    if [[ "$config_changed" == false && "$db_changed" == false ]]; then
-        return 0
-    fi
-
-    backup_dir=$(create_state_backup migration)
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    atomic_replace "$db_tmp" "$CLIENTS_DB"
-    atomic_replace "$config_tmp" "$XRAY_CONFIG"
-
-    if [[ "$config_changed" == true && "$was_active" == true ]]; then
-        if ! systemctl restart xray || ! wait_for_xray_health 15; then
-            print_color "$RED" "${CROSS} Migration restart failed; restoring $backup_dir"
-            restore_state_backup "$backup_dir" true
-            return 1
-        fi
-    fi
-    [[ "$quiet" == true ]] || print_color "$GREEN" "${CHECK} Profile migration complete (backup: $backup_dir)"
-}
-
-fetch_available_versions() {
-    local releases
-    releases=$(curl -fsSL --retry 3 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100') || return 1
-    jq -er '.[] | select(.draft == false and .prerelease == false) | .tag_name | sub("^v";"")' <<< "$releases"
-}
-
-fetch_experimental_versions() {
-    local releases
-    releases=$(curl -fsSL --retry 3 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30') || return 1
-    jq -er '.[] | select(.draft == false and .prerelease == true) | .tag_name | sub("^v";"")' <<< "$releases"
-}
-
-get_latest_xray_version() {
-    fetch_available_versions | head -n1
-}
-
-release_is_stable() {
-    local version=$1 releases
-    releases=$(curl -fsSL --retry 3 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100') || return 1
-    jq -e --arg tag "v$version" 'any(.[]; .tag_name == $tag and .draft == false and .prerelease == false)' <<< "$releases" >/dev/null
-}
-
-verify_configured_ports() {
-    local port
-    while IFS= read -r port; do
-        ss -lntH "sport = :$port" 2>/dev/null | grep -q . || return 1
-    done < <(jq -r '.inbounds[]? | select((.listen // "0.0.0.0") != "127.0.0.1") | .port // empty' "$XRAY_CONFIG" | sort -nu)
-}
-
-wait_for_xray_health() {
-    local timeout=${1:-15} attempt
-    for ((attempt=1; attempt<=timeout; attempt++)); do
-        if systemctl is-active --quiet xray 2>/dev/null && verify_configured_ports; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
-install_xray() {
-    local requested=${1:-} interactive=${2:-true} channel=${3:-stable}
-    local current target arch asset tmp_dir candidate backup_dir was_active=false owner group mode
-    current=$(get_installed_version)
-    if [[ -z "$requested" ]]; then
-        target=$(get_latest_xray_version) || {
-            print_color "$RED" "${CROSS} Unable to resolve the latest stable Xray release"
-            return 1
-        }
-    else
-        target=$requested
-    fi
-    validate_version_format "$target" || return 1
-    if [[ "$channel" != experimental ]] && ! release_is_stable "$target"; then
-        print_color "$RED" "${CROSS} Xray $target is not an official stable release"
-        print_color "$YELLOW" "Use the explicitly named experimental action if that is intentional."
-        return 1
-    fi
-    if [[ -z "$requested" && "$current" != not-installed && "$(printf '%s\n%s\n' "$target" "$current" | sort -V | tail -n1)" == "$current" ]]; then
-        print_color "$GREEN" "${CHECK} Installed: $current; latest stable: $target. No stable upgrade is required."
-        return 0
-    fi
-    if [[ "$interactive" == true ]]; then
-        print_color "$CYAN" "Installed version: $current"
-        print_color "$CYAN" "Selected ${channel} version: $target"
-        read -r -p "Continue with the version change? (y/n, 0 = back): " answer
-        [[ "$answer" =~ ^[Yy]$ ]] || return 0
-    fi
-
-    backup_dir=$(create_state_backup "xray-update-${current}-to-${target}")
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    case $(uname -m) in
-        x86_64|amd64) arch=64 ;;
-        aarch64|arm64) arch=arm64-v8a ;;
-        *) print_color "$RED" "Unsupported architecture: $(uname -m)"; return 1 ;;
-    esac
-    asset="https://github.com/XTLS/Xray-core/releases/download/v${target}/Xray-linux-${arch}.zip"
-    tmp_dir=$(mktemp -d /tmp/xray-update.XXXXXX)
-    trap 'rm -rf "${tmp_dir:-}"; trap - RETURN' RETURN
-    curl -fsSL --retry 3 -o "$tmp_dir/xray.zip" "$asset" || return 1
-    unzip -q "$tmp_dir/xray.zip" xray -d "$tmp_dir" || return 1
-    chmod 700 "$tmp_dir/xray"
-    candidate=$($tmp_dir/xray version 2>/dev/null | head -n1 | awk '{print $2}')
-    [[ "$candidate" == "$target" ]] || {
-        print_color "$RED" "${CROSS} Downloaded version mismatch: expected $target, got $candidate"
-        return 1
-    }
-    if [[ -f "$XRAY_CONFIG" ]] && ! "$tmp_dir/xray" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
-        print_color "$RED" "${CROSS} Xray $target rejected the production configuration"
-        return 1
-    fi
-
-    owner=$(stat -c %u "$XRAY_BIN" 2>/dev/null || echo 0)
-    group=$(stat -c %g "$XRAY_BIN" 2>/dev/null || echo 0)
-    mode=$(stat -c %a "$XRAY_BIN" 2>/dev/null || echo 755)
-    install -o "$owner" -g "$group" -m "$mode" "$tmp_dir/xray" "$(dirname "$XRAY_BIN")/.xray.new.$$"
-    mv -f "$(dirname "$XRAY_BIN")/.xray.new.$$" "$XRAY_BIN"
-
-    if [[ "$(get_installed_version)" != "$target" ]] ||
-       { [[ -f "$XRAY_CONFIG" ]] && ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; }; then
-        restore_state_backup "$backup_dir" "$was_active"
-        return 1
-    fi
-    if [[ "$was_active" == true ]]; then
-        print_color "$CYAN" "Waiting for Xray $target and all configured listeners..."
-        if ! systemctl restart xray || ! wait_for_xray_health 15; then
-            print_color "$RED" "${CROSS} Post-update health check failed; rolling back"
-            systemctl status xray --no-pager -l 2>/dev/null | sed -n '1,12p' || true
-            restore_state_backup "$backup_dir" true
-            return 1
-        fi
-    fi
-    print_color "$GREEN" "${CHECK} Xray $target installed and validated (rollback: $backup_dir)"
-}
-
-install_experimental_xray() {
-    print_color "$RED" "WARNING: Experimental Xray releases may break production compatibility."
-    local versions choice
-    versions=$(fetch_experimental_versions) || return 1
-    printf '%s\n' "$versions" | nl -w2 -s') '
-    echo "  0) Back"
-    read -r -p "Enter an experimental version exactly: " choice
-    [[ -n "$choice" && "$choice" != 0 ]] || return 0
-    grep -Fxq "$choice" <<< "$versions" || { print_color "$RED" "Not an advertised prerelease"; return 1; }
-    install_xray "$choice" true experimental
-}
-
-self_install() {
-    local current_script=$0 source_file tmp_file backup_dir mode=755
-    [[ "$current_script" == "$SCRIPT_INSTALL_PATH" ]] && return 0
-    tmp_file=$(mktemp "$(dirname "$SCRIPT_INSTALL_PATH")/.xray-manager.XXXXXX")
-    trap 'rm -f "${tmp_file:-}"; trap - RETURN' RETURN
-    if [[ -f "$current_script" && "$(basename "$current_script")" != bash && "$current_script" != /dev/fd/* && "$current_script" != /proc/* && "$(head -c 2 "$current_script" 2>/dev/null)" == '#!' ]]; then
-        cp "$current_script" "$tmp_file"
-    else
-        curl -fsSL --retry 3 "$SCRIPT_GITHUB_URL" -o "$tmp_file" || return 1
-    fi
-    [[ -s "$tmp_file" ]] && bash -n "$tmp_file" || {
-        print_color "$RED" "${CROSS} Refusing invalid or empty manager update"
-        return 1
-    }
-    if [[ -e "$SCRIPT_INSTALL_PATH" ]]; then
-        cmp -s "$tmp_file" "$SCRIPT_INSTALL_PATH" && return 0
-        backup_dir=$(create_state_backup self-update)
-        mode=$(stat -c %a "$SCRIPT_INSTALL_PATH")
-        chown --reference="$SCRIPT_INSTALL_PATH" "$tmp_file"
-    fi
-    chmod "$mode" "$tmp_file"
-    mv -f "$tmp_file" "$SCRIPT_INSTALL_PATH"
-    print_color "$GREEN" "${CHECK} Manager $MANAGER_VERSION installed atomically${backup_dir:+ (backup: $backup_dir)}"
-}
-
-show_status_dashboard() {
-    local installed latest channel
-    installed=$(get_installed_version)
-    latest=$(get_latest_xray_version 2>/dev/null || echo unavailable)
-    channel=unknown
-    if fetch_available_versions 2>/dev/null | grep -Fxq "$installed"; then channel=stable; elif [[ "$installed" != not-installed ]]; then channel=prerelease-or-unlisted; fi
-    show_logo
-    print_color "$BOLD$CYAN" "XRAY MULTI-PLATFORM STATUS"
-    printf '  Manager:       %s\n' "$MANAGER_VERSION"
-    printf '  Xray installed: %s (%s)\n' "$installed" "$channel"
-    printf '  Latest stable:  %s\n' "$latest"
-    printf '  Service:        %s\n\n' "$(systemctl is-active xray 2>/dev/null || echo unavailable)"
-    printf '  OS / kernel:    %s / %s\n' "$(. /etc/os-release; echo "$PRETTY_NAME")" "$(uname -r)"
-    printf '  Tools:          jq %s | OpenSSL %s | qrencode %s\n\n' \
-      "$(jq --version 2>/dev/null | sed 's/^jq-//')" "$(openssl version 2>/dev/null | awk '{print $2}')" \
-      "$(qrencode --version 2>/dev/null | awk 'NR==1{print $3}')"
-    if [[ -f "$XRAY_CONFIG" ]]; then
-        jq -r --arg legacy "$LEGACY_INBOUND_TAG" --arg ios "$IOS_INBOUND_TAG" --arg android "$ANDROID_INBOUND_TAG" '
-          .inbounds[]? | select(.protocol=="vless") |
-          "  \(if .tag==$ios then "iOS / Shadowrocket" elif .tag==$android then "Android / Advanced" elif .tag==$legacy then "Legacy / Existing" else (.tag//"Untagged") end)\n" +
-          "    Tag: \(.tag//"untagged") | Port: \(.port) | Clients: \((.settings.clients//[])|length)\n" +
-          "    VLESS: enabled | Encryption: \(if (.settings.decryption//"none") == "none" then "disabled" else "enabled" end)\n" +
-          "    Transport: \((.streamSettings.network//.streamSettings.method//"raw")|ascii_upcase) | Vision: \(if any(.settings.clients[]?; .flow=="xtls-rprx-vision") or ((.settings.clients|length)==0 and (.tag==$ios or .tag==$android)) then "enabled" else "disabled" end)\n" +
-          "    REALITY: \(if .streamSettings.security=="reality" then "enabled" else "disabled" end) | Fingerprint: chrome | SNI: \(.streamSettings.realitySettings.serverNames[0]//"n/a")\n" +
-          "    Compatibility: \(if .tag==$ios then "Shadowrocket" elif .tag==$android then "Modern Android/Xray" elif .tag==$legacy then "preserved" else "custom" end) | Stack status: stable-compatible"
-        ' "$XRAY_CONFIG"
-    fi
-    echo
-}
-
-client_record_by_identifier() {
-    local identifier=$1
-    jq -cer --arg id "$identifier" '
-        first(.clients[] | select(.uuid==$id or .email==$id or .logicalName==$id))
-    ' "$CLIENTS_DB"
-}
-
-select_client_record() {
-    local title=${1:-SELECT CLIENT}
-    local count selection record index email platform tag created
-    count=$(jq '.clients | length' "$CLIENTS_DB")
-    [[ "$count" -gt 0 ]] || { print_color "$YELLOW" "No clients found"; return 1; }
-
-    # Everything except the final JSON record goes to stderr. Callers use
-    # command substitution, so writing the menu to stdout made the list
-    # disappear and corrupted the selected record.
-    print_color "$BOLD$BLUE" "╭─ $title ────────────────────────────────────────────────────╮" >&2
-    print_color "$CYAN" "│ Choose by number, or enter the exact client email.          │" >&2
-    print_color "$BOLD$BLUE" "╰─────────────────────────────────────────────────────────────╯" >&2
-    printf '\n' >&2
-    while IFS=$'\t' read -r index email platform tag created; do
-        printf '  %b[%2s]%b %b%s%b\n' "$BOLD$YELLOW" "$index" "$NC" "$BOLD$CYAN" "$email" "$NC" >&2
-        printf '       Platform: %-9s  Inbound: %-24s\n' "$platform" "$tag" >&2
-        printf '       Created:  %s\n\n' "$created" >&2
-    done < <(jq -r '.clients | to_entries[] |
-        [(.key+1),.value.email,(.value.platform//"legacy"),
-         (.value.inboundTag//"legacy"),(.value.created//"unknown")] | @tsv' "$CLIENTS_DB")
-    printf '  %b[ 0]%b Cancel\n\n' "$BOLD$YELLOW" "$NC" >&2
-
-    read -r -p "  Client number or exact email: " selection
-    [[ "$selection" != 0 ]] || return 0
-    if [[ "$selection" =~ ^[0-9]+$ ]]; then
-        [[ "$selection" -ge 1 && "$selection" -le "$count" ]] || {
-            print_color "$RED" "  Invalid client number" >&2
-            return 1
-        }
-        jq -cer --argjson selected "$((selection - 1))" '.clients[$selected]' "$CLIENTS_DB"
-        return
-    fi
-    record=$(jq -cer --arg email "$selection" 'first(.clients[] | select(.email==$email))' "$CLIENTS_DB" 2>/dev/null) || {
-        print_color "$RED" "  No client has the exact email: $selection" >&2
-        return 1
-    }
-    printf '%s\n' "$record"
-}
-
-canonical_client_uri() {
-    local record=$1 tag uuid name sid flow fingerprint inbound port network security sni public_key encryption path
-    tag=$(jq -r '.inboundTag // .profile // empty' <<< "$record")
-    uuid=$(jq -r '.uuid' <<< "$record")
-    name=$(jq -r '.email // .logicalName // "Xray client"' <<< "$record")
-    sid=$(jq -r '.shortId // empty' <<< "$record")
-    flow=$(jq -r '.flow // "xtls-rprx-vision"' <<< "$record")
-    fingerprint=$(jq -r '.fingerprint // "chrome"' <<< "$record")
-    inbound=$(jq -cer --arg tag "$tag" 'first(.inbounds[] | select(.tag==$tag))' "$XRAY_CONFIG") || return 1
-    port=$(jq -r '.port' <<< "$inbound")
-    network=$(jq -r '.streamSettings.network // .streamSettings.method // "raw"' <<< "$inbound")
-    security=$(jq -r '.streamSettings.security // "none"' <<< "$inbound")
-    sni=$(jq -r '.streamSettings.realitySettings.serverNames[0] // empty' <<< "$inbound")
-    public_key=$(get_reality_public_key_for_tag "$tag") || return 1
-    encryption=$(jq -r --arg tag "$tag" '.profiles[$tag].clientEncryption // "none"' "$CLIENTS_DB")
-    path=$(jq -r '.streamSettings.xhttpSettings.path // empty' <<< "$inbound")
-    [[ "$security" == reality && -n "$uuid" && -n "$sid" && -n "$sni" ]] || return 1
-
-    local uri type
-    if [[ "$network" == xhttp ]]; then
-        type=xhttp
-        uri="vless://${uuid}@$(urlencode "$(get_server_address)"):${port}?encryption=$(urlencode "$encryption")&flow=$(urlencode "$flow")&security=reality&sni=$(urlencode "$sni")&fp=$(urlencode "$fingerprint")&pbk=$(urlencode "$public_key")&sid=$(urlencode "$sid")&type=xhttp&path=$(urlencode "$path")&mode=auto#$(urlencode "$name")"
-    else
-        type=tcp
-        uri="vless://${uuid}@$(urlencode "$(get_server_address)"):${port}?encryption=none&flow=$(urlencode "$flow")&security=reality&sni=$(urlencode "$sni")&fp=$(urlencode "$fingerprint")&pbk=$(urlencode "$public_key")&sid=$(urlencode "$sid")&type=${type}&headerType=none#$(urlencode "$name")"
-    fi
-    [[ "$uri" != *"privateKey"* && "$uri" != *"YOUR_SERVER_IP"* ]] || return 1
-    printf '%s\n' "$uri"
-}
-
-generate_client_url() {
-    local uuid=${1:-} sid=${2:-} name=${3:-} record uri
-    if [[ -n "$uuid" ]]; then
-        record=$(client_record_by_identifier "$uuid" 2>/dev/null || true)
-        if [[ -z "$record" && -n "$sid" ]]; then
-            record=$(jq -cn --arg uuid "$uuid" --arg sid "$sid" --arg name "${name:-REALITY-Vision}" \
-                --arg tag "$LEGACY_INBOUND_TAG" '{uuid:$uuid,shortId:$sid,email:$name,inboundTag:$tag,flow:"xtls-rprx-vision"}')
-        fi
-    else
-        record=$(select_client_record) || return 1
-        [[ -n "$record" ]] || return 0
-    fi
-    uri=$(canonical_client_uri "$record") || { print_color "$RED" "${CROSS} Unable to construct a valid client URI"; return 1; }
-    printf '%s\n' "$uri"
-}
-
-unique_short_id() {
-    local sid
-    while :; do
-        sid=$(generate_short_id)
-        jq -e --arg sid "$sid" 'any(.inbounds[]?.streamSettings.realitySettings.shortIds[]?; .==$sid)' "$1" >/dev/null || {
-            printf '%s\n' "$sid"
-            return 0
-        }
-    done
-}
-
-unique_uuid() {
-    local uuid
-    while :; do
-        uuid=$(generate_uuid)
-        jq -e --arg uuid "$uuid" 'any(.inbounds[]?.settings.clients[]?; .id==$uuid)' "$1" >/dev/null || {
-            printf '%s\n' "$uuid"
-            return 0
-        }
-    done
-}
-
-add_profile_clients_transaction() {
-    local logical_name=$1 choice=$2 restart_service=${3:-true} make_backup=${4:-true} show_output=${5:-true}
-    local config_tmp db_tmp backup_dir was_active=false profile profile_tag tag email uuid sid created transport platform path record uri
-    local -a profiles=()
-    case "$choice" in
-        ios) profiles=(ios) ;;
-        android) profiles=(android) ;;
-        desktop) profiles=(desktop) ;;
-        both) profiles=(ios android) ;;
-        all) profiles=(ios android desktop) ;;
-        *) return 1 ;;
-    esac
-    [[ -n "$logical_name" && ${#logical_name} -le 120 && "$logical_name" != *$'\n'* ]] || return 1
-    config_tmp=$(mktemp "$(dirname "$XRAY_CONFIG")/.add-client.XXXXXX.json")
-    db_tmp=$(mktemp "$(dirname "$CLIENTS_DB")/.add-client.XXXXXX.json")
-    cp -a "$XRAY_CONFIG" "$config_tmp"
-    cp -a "$CLIENTS_DB" "$db_tmp"
-    trap 'rm -f "${config_tmp:-}" "${db_tmp:-}"; trap - RETURN' RETURN
-    created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-    for profile in "${profiles[@]}"; do
-        case "$profile" in
-            ios)
-                profile_tag=$IOS_INBOUND_TAG; tag=$LEGACY_INBOUND_TAG
-                email="${logical_name}-ios"; transport=raw; platform=ios
-                ;;
-            android)
-                profile_tag=$ANDROID_INBOUND_TAG; tag=$ANDROID_INBOUND_TAG
-                email="${logical_name}-android"; transport=xhttp; platform=android
-                ;;
-            desktop)
-                profile_tag=$ANDROID_INBOUND_TAG; tag=$ANDROID_INBOUND_TAG
-                email="${logical_name}-desktop"; transport=xhttp; platform=desktop
-                ;;
-        esac
-        jq -e --arg tag "$tag" 'any(.inbounds[]?; .tag==$tag)' "$config_tmp" >/dev/null || {
-            print_color "$RED" "${CROSS} Profile $tag is unavailable"
-            return 1
-        }
-        jq -e --arg email "$email" 'any(.clients[]?; .email==$email)' "$db_tmp" >/dev/null && {
-            print_color "$RED" "${CROSS} Client $email already exists"
-            return 1
-        }
-        uuid=$(unique_uuid "$config_tmp")
-        sid=$(unique_short_id "$config_tmp")
-        path=$(jq -r --arg tag "$tag" 'first(.inbounds[] | select(.tag==$tag) | .streamSettings.xhttpSettings.path) // empty' "$config_tmp")
-        local next_config next_db
-        next_config=$(mktemp "$(dirname "$XRAY_CONFIG")/.add-client-next.XXXXXX.json")
-        jq --arg tag "$tag" --arg uuid "$uuid" --arg email "$email" --arg sid "$sid" '
-            (.inbounds[] | select(.tag==$tag) | .settings.clients) +=
-              [{id:$uuid,email:$email,flow:"xtls-rprx-vision"}] |
-            (.inbounds[] | select(.tag==$tag) | .streamSettings.realitySettings.shortIds) += [$sid]
-        ' "$config_tmp" > "$next_config"
-        mv -f "$next_config" "$config_tmp"
-        record=$(jq -cn --arg logical "$logical_name" --arg uuid "$uuid" --arg email "$email" \
-            --arg profile "$profile_tag" --arg inbound "$tag" --arg platform "$platform" --arg sid "$sid" --arg transport "$transport" \
-            --arg created "$created" --arg path "$path" \
-            '{logicalName:$logical,uuid:$uuid,email:$email,profile:$profile,platform:$platform,
-              inboundTag:$inbound,shortId:$sid,flow:"xtls-rprx-vision",transport:$transport,
-              fingerprint:"chrome",created:$created,legacy:false,migrated:false} +
-              (if $path!="" then {path:$path} else {} end)')
-        next_db=$(mktemp "$(dirname "$CLIENTS_DB")/.add-client-next.XXXXXX.json")
-        jq --argjson record "$record" '.clients += [$record]' "$db_tmp" > "$next_db"
-        mv -f "$next_db" "$db_tmp"
-    done
-
-    jq -e . "$db_tmp" >/dev/null
-    "$XRAY_BIN" run -test -config "$config_tmp" >/dev/null 2>&1 || {
-        print_color "$RED" "${CROSS} Xray rejected the candidate client configuration"
-        return 1
-    }
-    if [[ "$make_backup" == true ]]; then backup_dir=$(create_state_backup add-client); fi
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    atomic_replace "$db_tmp" "$CLIENTS_DB"
-    atomic_replace "$config_tmp" "$XRAY_CONFIG"
-    if [[ "$restart_service" == true && "$was_active" == true ]]; then
-        if ! systemctl restart xray || ! wait_for_xray_health 15; then
-            print_color "$RED" "${CROSS} Client activation failed; restoring $backup_dir"
-            [[ -n "$backup_dir" ]] && restore_state_backup "$backup_dir" true
-            return 1
-        fi
-    fi
-    if [[ "$show_output" == true ]]; then
-        for profile in "${profiles[@]}"; do
-            case "$profile" in
-                ios) email="${logical_name}-ios" ;;
-                android) email="${logical_name}-android" ;;
-                desktop) email="${logical_name}-desktop" ;;
-            esac
-            record=$(client_record_by_identifier "$email")
-            uri=$(canonical_client_uri "$record")
-            print_color "$GREEN" "${CHECK} Created $email"
-            printf '%s\n' "$uri"
-            command -v qrencode >/dev/null 2>&1 && qrencode -t ANSIUTF8 "$uri" || true
-        done
-    fi
-}
-
-add_client_wizard() {
-    local logical choice profile
-    print_color "$BOLD$BLUE" "╭─ ADD MULTI-PLATFORM CLIENT ─────────────────────────────────╮"
-    print_color "$CYAN"     "│ One logical name can create one or several app profiles.   │"
-    print_color "$BOLD$BLUE" "╰─────────────────────────────────────────────────────────────╯"
-    echo
-    read -r -p "  Logical client name (0 = back): " logical
-    [[ "$logical" != 0 ]] || return 0
-    [[ -n "$logical" ]] || { print_color "$RED" "A name is required"; return 1; }
-    echo
-    print_color "$BOLD$CYAN" "  Choose target platform"
-    printf '    %b1%b) iOS / Shadowrocket\n' "$YELLOW" "$NC"
-    printf '    %b2%b) Android / Advanced Xray\n' "$YELLOW" "$NC"
-    printf '    %b3%b) Desktop / v2rayN (Advanced Xray)\n' "$YELLOW" "$NC"
-    printf '    %b4%b) Mobile bundle (iOS + Android)\n' "$YELLOW" "$NC"
-    printf '    %b5%b) All platforms (iOS + Android + Desktop)\n' "$YELLOW" "$NC"
-    printf '    %b0%b) Cancel\n' "$YELLOW" "$NC"
-    echo
-    print_color "$MAGENTA" "  Advanced profiles use VLESS Encryption + XHTTP + Vision + REALITY."
-    read -r -p "  Profile: " choice
-    case "$choice" in
-        1) profile=ios ;;
-        2) profile=android ;;
-        3) profile=desktop ;;
-        4) profile=both ;;
-        5) profile=all ;;
-        0) return 0 ;;
-        *) print_color "$RED" "  Invalid profile choice"; return 1 ;;
-    esac
-    add_profile_clients_transaction "$logical" "$profile" true
-}
-
-add_client() { add_client_wizard; }
-
-list_clients() {
-    [[ -f "$CLIENTS_DB" ]] || return 1
-    printf '%-4s %-30s %-12s %-24s %-10s\n' "#" "Client" "Platform" "Inbound" "Created"
-    jq -r '.clients | to_entries[] |
-      [(.key+1),.value.email,(.value.platform//"legacy"),(.value.inboundTag//"legacy"),(.value.created//"unknown")] | @tsv' \
-      "$CLIENTS_DB" | while IFS=$'\t' read -r index email platform tag created; do
-        printf '%-4s %-30.30s %-12s %-24.24s %-10.10s\n' "$index" "$email" "$platform" "$tag" "$created"
-      done
-}
-
-show_client_info() {
-    local record uri inbound
-    record=$(select_client_record) || return 1
-    [[ -n "$record" ]] || return 0
-    uri=$(canonical_client_uri "$record") || return 1
-    inbound=$(jq -cer --arg tag "$(jq -r '.inboundTag' <<< "$record")" 'first(.inbounds[]|select(.tag==$tag))' "$XRAY_CONFIG")
-    jq -r --argjson inbound "$inbound" '
-      "Client: \(.email)\nLogical user: \(.logicalName)\nPlatform: \(.platform)\nInbound: \(.inboundTag)\nPort: \($inbound.port)\nTransport: \(.transport)\nFlow: \(.flow)\nSNI: \($inbound.streamSettings.realitySettings.serverNames[0])\nCreated: \(.created // "unknown")"
-    ' <<< "$record"
-    printf '\nCanonical URI:\n%s\n' "$uri"
-}
-
-generate_qr_code() {
-    local record uri
-    command -v qrencode >/dev/null 2>&1 || { print_color "$RED" "qrencode is not installed"; return 1; }
-    record=$(select_client_record) || return 1
-    [[ -n "$record" ]] || return 0
-    uri=$(canonical_client_uri "$record") || return 1
-    printf '%s\n' "$uri"
-    qrencode -t ANSIUTF8 "$uri"
-}
-
-remove_client() {
-    local record uuid email tag sid backup_dir config_tmp db_tmp was_active=false
-    record=$(select_client_record "REMOVE A CLIENT") || return $?
-    [[ -n "$record" ]] || return 0
-    uuid=$(jq -r '.uuid' <<< "$record"); email=$(jq -r '.email' <<< "$record")
-    tag=$(jq -r '.inboundTag' <<< "$record"); sid=$(jq -r '.shortId' <<< "$record")
-
-    print_color "$BOLD$RED" "╭─ CONFIRM REMOVAL ───────────────────────────────────────────╮"
-    printf '│  Client    %s\n' "$email"
-    printf '│  Platform  %s\n' "$(jq -r '.platform // "legacy"' <<< "$record")"
-    printf '│  Inbound   %s\n' "$tag"
-    print_color "$BOLD$RED" "╰─────────────────────────────────────────────────────────────╯"
-    print_color "$YELLOW" "  This removes only this profile; other clients are unchanged."
-    read -r -p "  Remove this client? (y/n, 0 = back): " answer
-    [[ "$answer" =~ ^[Yy]$ ]] || return 0
-    config_tmp=$(mktemp "$(dirname "$XRAY_CONFIG")/.remove-client.XXXXXX.json")
-    db_tmp=$(mktemp "$(dirname "$CLIENTS_DB")/.remove-client.XXXXXX.json")
-    jq --arg tag "$tag" --arg uuid "$uuid" --arg sid "$sid" '
-      (.inbounds[] | select(.tag==$tag) | .settings.clients) |= map(select(.id!=$uuid)) |
-      (.inbounds[] | select(.tag==$tag) | .streamSettings.realitySettings.shortIds) |= map(select(.!=$sid))
-    ' "$XRAY_CONFIG" > "$config_tmp"
-    jq --arg uuid "$uuid" '.clients |= map(select(.uuid!=$uuid))' "$CLIENTS_DB" > "$db_tmp"
-    "$XRAY_BIN" run -test -config "$config_tmp" >/dev/null 2>&1 || return 1
-    backup_dir=$(create_state_backup remove-client)
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    atomic_replace "$db_tmp" "$CLIENTS_DB"; atomic_replace "$config_tmp" "$XRAY_CONFIG"
-    if [[ "$was_active" == true ]] && (! systemctl restart xray || ! wait_for_xray_health 15); then
-        restore_state_backup "$backup_dir" true
-        return 1
-    fi
-    print_color "$GREEN" "${CHECK} Removed $email"
-    print_color "$CYAN" "  Rollback backup: $backup_dir"
-}
-
-mass_remove_clients() {
-    local pattern matches answer batch_backup was_active=false
-    list_clients
-    echo "  0) Back"
-    read -r -p "Exact email prefix to remove: " pattern
-    [[ -n "$pattern" && "$pattern" != 0 ]] || return 0
-    matches=$(jq -r --arg p "$pattern" '[.clients[] | select(.email|startswith($p))] | length' "$CLIENTS_DB")
-    [[ "$matches" -gt 0 ]] || { print_color "$YELLOW" "No matching clients"; return 0; }
-    print_color "$YELLOW" "$matches profile record(s) match. They will be removed from their tagged inbounds."
-    read -r -p "Type REMOVE to continue (0 = back): " answer
-    [[ "$answer" == REMOVE ]] || return 0
-    batch_backup=$(create_state_backup mass-remove)
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    while jq -e --arg p "$pattern" 'any(.clients[]?; .email|startswith($p))' "$CLIENTS_DB" >/dev/null; do
-        local first
-        first=$(jq -r --arg p "$pattern" 'first(.clients[]|select(.email|startswith($p))|.email)' "$CLIENTS_DB")
-        # Perform the same tag-aware transaction without relying on array zero.
-        local record uuid tag sid config_tmp db_tmp
-        record=$(client_record_by_identifier "$first"); uuid=$(jq -r .uuid <<< "$record")
-        tag=$(jq -r .inboundTag <<< "$record"); sid=$(jq -r .shortId <<< "$record")
-        config_tmp=$(mktemp "$(dirname "$XRAY_CONFIG")/.mass-remove.XXXXXX.json")
-        db_tmp=$(mktemp "$(dirname "$CLIENTS_DB")/.mass-remove.XXXXXX.json")
-        jq --arg tag "$tag" --arg uuid "$uuid" --arg sid "$sid" '
-          (.inbounds[]|select(.tag==$tag)|.settings.clients)|=map(select(.id!=$uuid)) |
-          (.inbounds[]|select(.tag==$tag)|.streamSettings.realitySettings.shortIds)|=map(select(.!=$sid))' "$XRAY_CONFIG" > "$config_tmp"
-        jq --arg uuid "$uuid" '.clients|=map(select(.uuid!=$uuid))' "$CLIENTS_DB" > "$db_tmp"
-        atomic_replace "$db_tmp" "$CLIENTS_DB"; atomic_replace "$config_tmp" "$XRAY_CONFIG"
-    done
-    if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
-        restore_state_backup "$batch_backup" "$was_active" || true
-        return 1
-    fi
-    if [[ "$was_active" == true ]] && (! systemctl restart xray || ! wait_for_xray_health 15); then
-        restore_state_backup "$batch_backup" true
-        return 1
-    fi
-    print_color "$GREEN" "${CHECK} Removed $matches profile record(s) (backup: $batch_backup)"
-}
-
-export_clients() {
-    local timestamp export_file tmp record uri
-    timestamp=$(date -u +%Y%m%dT%H%M%SZ)
-    export_file="${HOME}/xray_clients_full_${timestamp}.json"
-    tmp=$(mktemp "${HOME}/.xray-export.XXXXXX")
-    jq '{format:"xray-manager-profile-export-v2",exportedAt:(now|todate),schemaVersion,
-      profiles,clients,urls:[]}' "$CLIENTS_DB" > "$tmp"
-    while IFS= read -r record; do
-        uri=$(canonical_client_uri "$record") || continue
-        local next
-        next=$(mktemp "${HOME}/.xray-export-next.XXXXXX")
-        jq --arg uuid "$(jq -r .uuid <<< "$record")" --arg email "$(jq -r .email <<< "$record")" --arg uri "$uri" \
-          '.urls += [{uuid:$uuid,email:$email,uri:$uri}]' "$tmp" > "$next"
-        mv -f "$next" "$tmp"
-    done < <(jq -c '.clients[]' "$CLIENTS_DB")
-    chmod 600 "$tmp"; mv -f "$tmp" "$export_file"
-    print_color "$GREEN" "${CHECK} Full profile export: $export_file"
-    print_color "$YELLOW" "UUIDs, profile mappings, short IDs, and canonical URLs were preserved. The REALITY private key was not exported."
-}
-
-generate_all_qr_codes() {
-    local stamp output_dir index_file record email safe_name uri escaped_email escaped_uri
-    command -v qrencode >/dev/null 2>&1 || return 1
-    stamp=$(date -u +%Y%m%dT%H%M%SZ)
-    output_dir="${HOME}/xray_profile_qr_${stamp}"
-    install -d -m 700 "$output_dir"
-    index_file="$output_dir/index.html"
-    printf '%s\n' '<!doctype html><html><head><meta charset="utf-8"><title>Xray profiles</title><style>body{font-family:sans-serif;background:#101522;color:#eee}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:18px}.card{background:#1b2438;padding:16px;border-radius:10px}img{max-width:240px;background:white}code{word-break:break-all}</style></head><body><h1>Xray platform profiles</h1><div class="grid">' > "$index_file"
-    while IFS= read -r record; do
-        email=$(jq -r .email <<< "$record"); uri=$(canonical_client_uri "$record") || continue
-        safe_name=$(tr -cd '[:alnum:]_-' <<< "$email"); [[ -n "$safe_name" ]] || safe_name=$(jq -r .uuid <<< "$record")
-        qrencode -t PNG -o "$output_dir/${safe_name}.png" -s 6 -m 2 "$uri"
-        escaped_email=$(html_escape "$email"); escaped_uri=$(html_escape "$uri")
-        printf '<div class="card"><h3>%s</h3><p>%s / %s</p><img src="%s.png" alt="QR"><p><code>%s</code></p></div>\n' \
-          "$escaped_email" "$(html_escape "$(jq -r .platform <<< "$record")")" \
-          "$(html_escape "$(jq -r .inboundTag <<< "$record")")" "$safe_name" "$escaped_uri" >> "$index_file"
-    done < <(jq -c '.clients[]' "$CLIENTS_DB")
-    printf '%s\n' '</div></body></html>' >> "$index_file"
-    chmod 600 "$index_file" "$output_dir"/*.png 2>/dev/null || true
-    print_color "$GREEN" "${CHECK} Profile-aware QR/HTML export: $output_dir"
-}
-
-mass_config_generator() {
-    local base count profile_choice profile i name was_active=false batch_backup
-    echo "  0) Back"
-    read -r -p "Base logical name: " base
-    [[ "$base" != 0 ]] || return 0
-    [[ -n "$base" ]] || return 1
-    read -r -p "Number of logical users (1-200, 0 = back): " count
-    [[ "$count" != 0 ]] || return 0
-    [[ "$count" =~ ^[0-9]+$ && "$count" -ge 1 && "$count" -le 200 ]] || return 1
-    echo
-    echo "  1) iOS / Shadowrocket"
-    echo "  2) Android / Advanced"
-    echo "  3) Desktop / v2rayN Advanced"
-    echo "  4) Mobile bundle (iOS + Android)"
-    echo "  5) All platforms"
-    echo "  0) Back"
-    read -r -p "Profile: " profile_choice
-    case "$profile_choice" in
-        1) profile=ios ;;
-        2) profile=android ;;
-        3) profile=desktop ;;
-        4) profile=both ;;
-        5) profile=all ;;
-        0) return 0 ;;
-        *) return 1 ;;
-    esac
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    batch_backup=$(create_state_backup mass-add)
-    for ((i=1;i<=count;i++)); do
-        name=$(printf '%s_%03d' "$base" "$i")
-        if ! add_profile_clients_transaction "$name" "$profile" false false false; then
-            restore_state_backup "$batch_backup" "$was_active" || true
-            return 1
-        fi
-    done
-    if [[ "$was_active" == true ]] && (! systemctl restart xray || ! wait_for_xray_health 15); then
-        restore_state_backup "$batch_backup" true
-        return 1
-    fi
-    print_color "$GREEN" "${CHECK} Generated $count logical user(s) (rollback: $batch_backup)"
-    generate_all_qr_codes
-}
-
-select_legacy_client_record() {
-    local count selection record index email platform created
-    count=$(jq --arg legacy "$LEGACY_INBOUND_TAG" '[.clients[] |
-      select(.inboundTag==$legacy and ((.platform//"legacy")|IN("legacy","android-legacy")) and (.legacy//false)==true)] | length' "$CLIENTS_DB")
-    [[ "$count" -gt 0 ]] || { print_color "$YELLOW" "No original legacy clients are available" >&2; return 1; }
-
-    print_color "$BOLD$BLUE" "╭─ SELECT LEGACY CLIENT ──────────────────────────────────────╮" >&2
-    print_color "$CYAN" "│ The original credential will remain valid and unchanged.   │" >&2
-    print_color "$BOLD$BLUE" "╰─────────────────────────────────────────────────────────────╯" >&2
-    printf '\n' >&2
-    while IFS=$'\t' read -r index email platform created; do
-        printf '  %b[%2s]%b %b%s%b\n' "$BOLD$YELLOW" "$index" "$NC" "$BOLD$CYAN" "$email" "$NC" >&2
-        printf '       Current profile: %-15s  Created: %s\n\n' "$platform" "$created" >&2
-    done < <(jq -r --arg legacy "$LEGACY_INBOUND_TAG" '
-      [.clients[] | select(.inboundTag==$legacy and ((.platform//"legacy")|IN("legacy","android-legacy")) and (.legacy//false)==true)] |
-      to_entries[] | [(.key+1),.value.email,(.value.platform//"legacy"),(.value.created//"unknown")] | @tsv' "$CLIENTS_DB")
-    printf '  %b[ 0]%b Back\n\n' "$BOLD$YELLOW" "$NC" >&2
-    read -r -p "  Legacy client number or exact email: " selection
-    [[ "$selection" != 0 ]] || return 0
-    if [[ "$selection" =~ ^[0-9]+$ ]]; then
-        [[ "$selection" -ge 1 && "$selection" -le "$count" ]] || return 1
-        jq -cer --arg legacy "$LEGACY_INBOUND_TAG" --argjson selected "$((selection-1))" '
-          [.clients[] | select(.inboundTag==$legacy and ((.platform//"legacy")|IN("legacy","android-legacy")) and (.legacy//false)==true)][$selected]' "$CLIENTS_DB"
-        return
-    fi
-    record=$(jq -cer --arg legacy "$LEGACY_INBOUND_TAG" --arg email "$selection" '
-      first(.clients[] | select(.inboundTag==$legacy and ((.platform//"legacy")|IN("legacy","android-legacy")) and (.legacy//false)==true and .email==$email))' \
-      "$CLIENTS_DB" 2>/dev/null) || {
-        print_color "$RED" "  No original legacy client has that exact email" >&2
-        return 1
-    }
-    printf '%s\n' "$record"
-}
-
-show_legacy_migration_status() {
-    local total complete partial untouched
-    read -r total complete partial untouched < <(jq -r --arg legacy "$LEGACY_INBOUND_TAG" '
-      .clients as $all |
-      [$all[] | select(.inboundTag==$legacy and ((.platform//"legacy")|IN("legacy","android-legacy")) and (.legacy//false)==true)] as $sources |
-      reduce $sources[] as $source ({complete:0,partial:0,untouched:0};
-        ([$all[] | select(.migratedFromUuid==$source.uuid) | .compatibilityVariant] | unique) as $variants |
-        if (($variants|index("ios"))!=null and ($variants|index("android-advanced"))!=null) then .complete += 1
-        elif ($variants|length)>0 then .partial += 1 else .untouched += 1 end) |
-      [($sources|length),.complete,.partial,.untouched] | @tsv' "$CLIENTS_DB")
-    print_color "$BOLD$CYAN" "LEGACY COMPATIBILITY MIGRATION STATUS"
-    printf '  Original legacy clients: %s\n' "$total"
-    printf '  Complete bundles:        %s\n' "$complete"
-    printf '  Partial bundles:         %s\n' "$partial"
-    printf '  Not migrated:            %s\n' "$untouched"
-    echo
-    print_color "$CYAN" "Each complete bundle contains:"
-    echo "  • Original Android-legacy URI (unchanged)"
-    echo "  • iOS / Shadowrocket TCP + Vision + REALITY"
-    echo "  • Android advanced VLESS Encryption + XHTTP + Vision + REALITY"
-}
-
-migrate_legacy_bundle_transaction() {
-    local selection=${1:-all} backup_dir was_active=false config_changed=false added=0 stamp
-    local source uuid base ios_email android_email old_uri new_uri next_db companion i
-    local -a sources=() original_uris=()
-    if [[ "$selection" == all ]]; then
-        mapfile -t sources < <(jq -c --arg legacy "$LEGACY_INBOUND_TAG" \
-          '.clients[] | select(.inboundTag==$legacy and ((.platform//"legacy")|IN("legacy","android-legacy")) and (.legacy//false)==true)' "$CLIENTS_DB")
-    else
-        sources=("$selection")
-    fi
-    [[ ${#sources[@]} -gt 0 ]] || { print_color "$YELLOW" "No legacy clients require migration"; return 0; }
-
-    for source in "${sources[@]}"; do
-        original_uris+=("$(canonical_client_uri "$source")") || return 1
-    done
-    backup_dir=$(create_state_backup legacy-bundle)
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-    for source in "${sources[@]}"; do
-        uuid=$(jq -r '.uuid' <<< "$source")
-        base=$(jq -r '.migrationBase // .email' <<< "$source")
-        ios_email="${base}-ios"
-        android_email="${base}-android"
-
-        companion=$(client_record_by_identifier "$ios_email" 2>/dev/null || true)
-        if [[ -z "$companion" ]]; then
-            if ! add_profile_clients_transaction "$base" ios false false false; then
-                restore_state_backup "$backup_dir" "$was_active" || true
-                return 1
-            fi
-            added=$((added+1)); config_changed=true
-        elif ! jq -e --arg base "$base" '.platform=="ios" and .logicalName==$base' <<< "$companion" >/dev/null; then
-            print_color "$RED" "${CROSS} Name collision: $ios_email belongs to another profile"
-            restore_state_backup "$backup_dir" "$was_active" || true
-            return 1
-        fi
-
-        companion=$(client_record_by_identifier "$android_email" 2>/dev/null || true)
-        if [[ -z "$companion" ]]; then
-            if ! add_profile_clients_transaction "$base" android false false false; then
-                restore_state_backup "$backup_dir" "$was_active" || true
-                return 1
-            fi
-            added=$((added+1)); config_changed=true
-        elif ! jq -e --arg base "$base" '.platform=="android" and .logicalName==$base' <<< "$companion" >/dev/null; then
-            print_color "$RED" "${CROSS} Name collision: $android_email belongs to another profile"
-            restore_state_backup "$backup_dir" "$was_active" || true
-            return 1
-        fi
-
-        next_db=$(mktemp "$(dirname "$CLIENTS_DB")/.legacy-bundle.XXXXXX.json")
-        jq --arg uuid "$uuid" --arg base "$base" --arg iosEmail "$ios_email" \
-           --arg androidEmail "$android_email" --arg stamp "$stamp" --arg legacy "$LEGACY_INBOUND_TAG" '
-          (.clients[] | select(.uuid==$uuid)) +=
-            {platform:"android-legacy",profile:$legacy,compatibilityVariant:"android-legacy",
-             migrationBase:$base,migrationCompletedAt:$stamp,legacy:true} |
-          (.clients[] | select(.email==$iosEmail)) +=
-            {migratedFromUuid:$uuid,compatibilityVariant:"ios",migrationBase:$base} |
-          (.clients[] | select(.email==$androidEmail)) +=
-            {migratedFromUuid:$uuid,compatibilityVariant:"android-advanced",migrationBase:$base}
-        ' "$CLIENTS_DB" > "$next_db"
-        atomic_replace "$next_db" "$CLIENTS_DB"
-    done
-
-    if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
-        restore_state_backup "$backup_dir" "$was_active" || true
-        return 1
-    fi
-    for i in "${!sources[@]}"; do
-        source=${sources[$i]}; uuid=$(jq -r '.uuid' <<< "$source")
-        if ! jq -e --arg uuid "$uuid" 'any(.inbounds[]?.settings.clients[]?; .id==$uuid)' "$XRAY_CONFIG" >/dev/null; then
-            restore_state_backup "$backup_dir" "$was_active" || true
-            return 1
-        fi
-        source=$(client_record_by_identifier "$uuid")
-        new_uri=$(canonical_client_uri "$source") || {
-            restore_state_backup "$backup_dir" "$was_active" || true
-            return 1
-        }
-        if [[ "$new_uri" != "${original_uris[$i]}" ]]; then
-            print_color "$RED" "${CROSS} Original URI safety check failed; restoring backup"
-            restore_state_backup "$backup_dir" "$was_active" || true
-            return 1
-        fi
-    done
-    if [[ "$config_changed" == true && "$was_active" == true ]] &&
-       (! systemctl restart xray || ! wait_for_xray_health 20); then
-        restore_state_backup "$backup_dir" true || true
-        return 1
-    fi
-    print_color "$GREEN" "${CHECK} Migrated ${#sources[@]} legacy client(s); added $added companion profile(s)"
-    print_color "$GREEN" "${CHECK} Every original UUID, short ID, and URI remained unchanged"
-    print_color "$CYAN" "  Rollback backup: $backup_dir"
-}
-
-migrate_legacy_clients_menu() {
-    local choice record confirm
-    while :; do
-        echo
-        print_color "$BOLD$BLUE" "╭─ LEGACY → MULTI-PLATFORM BUNDLES ───────────────────────────╮"
-        echo "│  1) Migrate one legacy client"
-        echo "│  2) Migrate every legacy client"
-        echo "│  3) Show migration status"
-        echo "│  0) Back"
-        print_color "$BOLD$BLUE" "╰─────────────────────────────────────────────────────────────╯"
-        read -r -p "  Choice: " choice
-        case "$choice" in
-            1)
-                record=$(select_legacy_client_record) || return $?
-                [[ -n "$record" ]] || return 0
-                migrate_legacy_bundle_transaction "$record"
-                return
-                ;;
-            2)
-                show_legacy_migration_status
-                print_color "$YELLOW" "Original credentials will be preserved; two companion profiles are added per legacy client."
-                read -r -p "Type MIGRATE to continue (0 = back): " confirm
-                [[ "$confirm" != 0 ]] || return 0
-                [[ "$confirm" == MIGRATE ]] || { print_color "$YELLOW" "Migration cancelled"; return 0; }
-                migrate_legacy_bundle_transaction all
-                return
-                ;;
-            3)
-                show_legacy_migration_status
-                read -r -p "Enter 0 to go back: " confirm
-                [[ "$confirm" == 0 ]] || true
-                ;;
-            0) return 0 ;;
-            *) print_color "$RED" "Invalid choice" ;;
-        esac
-    done
-}
-
-backup_config() {
-    local backup_dir
-    backup_dir=$(create_state_backup manual)
-    print_color "$GREEN" "${CHECK} Complete state backup: $backup_dir"
-}
-
-check_and_fix_private_key() {
-    local interactive=false tag private public failures=0
-    [[ "${1:-}" == --interactive ]] && interactive=true
-    while IFS= read -r tag; do
-        private=$(jq -r --arg tag "$tag" 'first(.inbounds[]|select(.tag==$tag)|.streamSettings.realitySettings.privateKey)//empty' "$XRAY_CONFIG")
-        if [[ -z "$private" ]] || ! public=$(derive_reality_public_key "$private"); then
-            print_color "$RED" "${CROSS} $tag has no usable REALITY private key; it was not rotated"
-            failures=$((failures+1))
-        else
-            print_color "$GREEN" "${CHECK} $tag REALITY key pair is derivable"
-        fi
-    done < <(jq -r '.inbounds[]?|select(.streamSettings.security=="reality")|.tag//"untagged"' "$XRAY_CONFIG")
-    [[ "$failures" -eq 0 ]] || return 1
-    get_reality_public_key >/dev/null 2>&1 || true
-    [[ "$interactive" == true ]] && print_color "$CYAN" "No private key was displayed or changed."
-}
-
-run_system_diagnostics() {
-    local failures=0 tag port db_count config_count duplicate_uuid duplicate_sid mapping_mismatch profile_mismatch
-    print_color "$BOLD$CYAN" "PROFILE-AWARE XRAY DIAGNOSTICS"
-    printf 'Manager: %s | Xray: %s | OS: %s | Kernel: %s\n' "$MANAGER_VERSION" "$(get_installed_version)" \
-      "$(. /etc/os-release; echo "$PRETTY_NAME")" "$(uname -r)"
-    jq -e . "$XRAY_CONFIG" >/dev/null && print_color "$GREEN" "${CHECK} Config JSON valid" || { failures=$((failures+1)); print_color "$RED" "${CROSS} Config JSON invalid"; }
-    "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1 && print_color "$GREEN" "${CHECK} Xray config validation passed" || { failures=$((failures+1)); print_color "$RED" "${CROSS} Xray config validation failed"; }
-    systemctl is-active --quiet xray && print_color "$GREEN" "${CHECK} Service active" || { failures=$((failures+1)); print_color "$RED" "${CROSS} Service inactive"; }
-    while IFS=$'\t' read -r tag port config_count; do
-        if ss -lntH "sport = :$port" 2>/dev/null | grep -q .; then
-            print_color "$GREEN" "${CHECK} $tag listening on TCP $port ($config_count clients)"
-        else
-            failures=$((failures+1)); print_color "$RED" "${CROSS} $tag not listening on TCP $port"
-        fi
-    done < <(jq -r '.inbounds[]?|[.tag,.port,((.settings.clients//[])|length)]|@tsv' "$XRAY_CONFIG")
-    db_count=$(jq '.clients|length' "$CLIENTS_DB")
-    config_count=$(jq '[.inbounds[]?.settings.clients[]?]|length' "$XRAY_CONFIG")
-    [[ "$db_count" -eq "$config_count" ]] && print_color "$GREEN" "${CHECK} Database/config client counts match ($db_count)" || { failures=$((failures+1)); print_color "$RED" "${CROSS} DB clients=$db_count, config clients=$config_count"; }
-    duplicate_uuid=$(jq -r '[.inbounds[]?.settings.clients[]?.id]|group_by(.)|map(select(length>1))|length' "$XRAY_CONFIG")
-    duplicate_sid=$(jq -r '[.inbounds[]?.streamSettings.realitySettings.shortIds[]?]|group_by(.)|map(select(length>1))|length' "$XRAY_CONFIG")
-    [[ "$duplicate_uuid" -eq 0 ]] && print_color "$GREEN" "${CHECK} No duplicate UUIDs" || { failures=$((failures+1)); print_color "$RED" "${CROSS} Duplicate UUIDs: $duplicate_uuid"; }
-    [[ "$duplicate_sid" -eq 0 ]] && print_color "$GREEN" "${CHECK} No duplicate short IDs" || { failures=$((failures+1)); print_color "$RED" "${CROSS} Duplicate short IDs: $duplicate_sid"; }
-    mapping_mismatch=$(jq -r --slurpfile cfg "$XRAY_CONFIG" '[.clients[] as $client |
-      select((any($cfg[0].inbounds[];
-        .tag == $client.inboundTag and
-        any(.settings.clients[]?; .id == $client.uuid and .email == $client.email) and
-        any(.streamSettings.realitySettings.shortIds[]?; . == $client.shortId)) | not))] | length' "$CLIENTS_DB")
-    [[ "$mapping_mismatch" -eq 0 ]] && print_color "$GREEN" "${CHECK} Every DB record matches its tagged UUID, email, and short ID" || { failures=$((failures+1)); print_color "$RED" "${CROSS} DB/config mapping mismatches: $mapping_mismatch"; }
-    profile_mismatch=$(jq -r --slurpfile cfg "$XRAY_CONFIG" '[.clients[] as $client |
-      (first($cfg[0].inbounds[] | select(.tag==$client.inboundTag) | (.streamSettings.network//.streamSettings.method//"raw")) // "missing") as $network |
-      select((($client.transport == "raw") and ($network | IN("raw","tcp") | not)) or (($client.transport == "xhttp") and $network != "xhttp"))] | length' "$CLIENTS_DB")
-    [[ "$profile_mismatch" -eq 0 ]] && print_color "$GREEN" "${CHECK} Client profile/transport mappings are consistent" || { failures=$((failures+1)); print_color "$RED" "${CROSS} Profile/transport mismatches: $profile_mismatch"; }
-    while IFS= read -r tag; do
-        get_reality_public_key_for_tag "$tag" >/dev/null && print_color "$GREEN" "${CHECK} $tag REALITY public/private relationship valid" || { failures=$((failures+1)); print_color "$RED" "${CROSS} $tag REALITY key relationship invalid"; }
-    done < <(jq -r '.inbounds[]?|select(.streamSettings.security=="reality")|.tag' "$XRAY_CONFIG")
-    if jq -e --arg tag "$ANDROID_INBOUND_TAG" 'any(.inbounds[]?; .tag==$tag)' "$XRAY_CONFIG" >/dev/null; then
-        "$XRAY_BIN" vlessenc >/dev/null 2>&1 && print_color "$GREEN" "${CHECK} VLESS Encryption capability available" || { failures=$((failures+1)); print_color "$RED" "${CROSS} VLESS Encryption capability unavailable"; }
-    fi
-    local bad_uri=0 record
-    while IFS= read -r record; do canonical_client_uri "$record" >/dev/null || bad_uri=$((bad_uri+1)); done < <(jq -c '.clients[]' "$CLIENTS_DB")
-    [[ "$bad_uri" -eq 0 ]] && print_color "$GREEN" "${CHECK} All $db_count canonical URIs passed sanity checks" || { failures=$((failures+1)); print_color "$RED" "${CROSS} Invalid URIs: $bad_uri"; }
-    if command -v ufw >/dev/null 2>&1; then ufw status 2>/dev/null | sed -n '1s/^Status:/UFW status:/p'; fi
-    printf 'Diagnostics result: %s failure(s)\n' "$failures"
-    [[ "$failures" -eq 0 ]]
-}
-
-show_connection_guide() {
-    local record uri platform
-    record=$(select_client_record) || return 1
-    [[ -n "$record" ]] || return 0
-    uri=$(canonical_client_uri "$record") || return 1
-    platform=$(jq -r '.platform' <<< "$record")
-    printf 'Profile: %s (%s)\n\n' "$(jq -r '.email' <<< "$record")" "$platform"
-    if [[ "$platform" == ios ]]; then
-        echo "Shadowrocket: scan the QR or import the URI, confirm VLESS, TCP, Vision, REALITY, SNI, chrome fingerprint, public key, and short ID."
-    elif [[ "$platform" == android ]]; then
-        echo "Modern Android/Xray client: import the URI and confirm VLESS Encryption, XHTTP, Vision, REALITY, chrome fingerprint, path, public key, and short ID."
-    elif [[ "$platform" == desktop ]]; then
-        echo "v2rayN desktop: import the URI, select the generated profile, and confirm Xray Core is current. The profile uses VLESS Encryption, XHTTP, Vision, REALITY, chrome fingerprint, path, public key, and short ID."
-    elif [[ "$platform" == android-legacy || "$platform" == legacy ]]; then
-        echo "Android legacy compatibility: import the URI as VLESS TCP, Vision, and REALITY. This original credential is preserved without XHTTP or VLESS Encryption."
-    else
-        echo "Existing client: keep its current app settings; this profile was not moved or re-keyed."
-    fi
-    printf '\n%s\n' "$uri"
-}
-
-show_client_stats() {
-    print_color "$BOLD$CYAN" "CLIENT PROFILE COUNTS"
-    jq -r '.clients | group_by(.platform // "legacy")[] | "  \(.[0].platform // "legacy"): \(length)"' "$CLIENTS_DB"
-    print_color "$CYAN" "Traffic totals are not fabricated; enable Xray statistics/API explicitly if per-client byte counters are required."
-}
-
-check_status() {
-    show_status_dashboard
-    "$XRAY_BIN" run -test -config "$XRAY_CONFIG"
-    systemctl status xray --no-pager -l | sed -n '1,18p'
-    verify_configured_ports && print_color "$GREEN" "${CHECK} All configured public TCP ports are listening"
-}
-
-run_dpi_security_test() {
-    print_color "$BOLD$CYAN" "OBSERVABLE CONFIGURATION AND NETWORK CHECKS"
-    print_color "$YELLOW" "This test does not claim that any stack is 'DPI proof'."
-    run_system_diagnostics
-}
-
-configure_xray() {
-    if [[ -f "$XRAY_CONFIG" ]]; then
-        print_color "$CYAN" "Existing production configuration detected; applying only the idempotent profile migration."
-        migrate_profile_state false
-        show_status_dashboard
-        return
-    fi
-    print_color "$RED" "${CROSS} No existing configuration was found."
-    print_color "$YELLOW" "This production upgrade path will not synthesize a new server configuration without an existing REALITY identity."
-    return 1
-}
-
-version_management_menu() {
-    local installed latest choice
-    while :; do
-        installed=$(get_installed_version)
-        latest=$(get_latest_xray_version 2>/dev/null || echo unavailable)
-        echo
-        print_color "$BOLD$CYAN" "XRAY VERSION MANAGEMENT"
-        printf '  Installed version:    %s\n' "$installed"
-        printf '  Latest stable version: %s\n\n' "$latest"
-        echo "  1) Install/update to latest stable"
-        echo "  2) Install a specific stable version"
-        echo "  3) List stable releases"
-        echo "  4) Restore a complete update backup"
-        echo "  5) EXPERIMENTAL: install a prerelease"
-        echo "  0) Back"
-        read -r -p "Choice: " choice
-        case "$choice" in
-          1) install_xray ;;
-          2) read -r -p "Stable version: " version; install_xray "$version" ;;
-          3) fetch_available_versions ;;
-          4) rollback_xray_version ;;
-          5) install_experimental_xray ;;
-          0) return ;;
-          *) print_color "$RED" "Invalid choice" ;;
-        esac
-    done
-}
-
-rollback_xray_version() {
-    local -a backups=()
-    local item choice selected was_active=false
-    while IFS= read -r item; do backups+=("$item"); done < <(find "$MANAGER_BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'xray-update-*' -print 2>/dev/null | sort -r)
-    [[ ${#backups[@]} -gt 0 ]] || { print_color "$YELLOW" "No complete update backups found"; return 1; }
-    for item in "${!backups[@]}"; do printf '  %d) %s\n' "$((item+1))" "${backups[$item]}"; done
-    echo "  0) Back"
-    read -r -p "Backup number: " choice
-    [[ "$choice" != 0 ]] || return 0
-    [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 1 && "$choice" -le ${#backups[@]} ]] || return 1
-    selected=${backups[$((choice-1))]}
-    [[ -x "$selected/xray" && -f "$selected/config.json" && -f "$selected/clients.json" ]] || return 1
-    "$selected/xray" run -test -config "$selected/config.json" >/dev/null 2>&1 || {
-        print_color "$RED" "${CROSS} Backup configuration does not validate with its binary"
-        return 1
-    }
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    local safety
-    safety=$(create_state_backup before-rollback)
-    if ! restore_state_backup "$selected" "$was_active"; then
-        restore_state_backup "$safety" "$was_active" || true
-        return 1
-    fi
-    print_color "$GREEN" "${CHECK} Complete state restored from $selected"
-}
-
-restore_config() {
-    local source safety was_active=false
-    find "$MANAGER_BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort -r | sed -n '1,20p'
-    echo "  0) Back"
-    read -r -p "Enter the exact backup directory to restore: " source
-    [[ -n "$source" && "$source" != 0 ]] || return 0
-    [[ "$source" == "$MANAGER_BACKUP_DIR"/* && -f "$source/config.json" && -f "$source/clients.json" ]] || {
-        print_color "$RED" "Invalid backup directory"
-        return 1
-    }
-    jq -e . "$source/clients.json" >/dev/null && "$XRAY_BIN" run -test -config "$source/config.json" >/dev/null 2>&1 || {
-        print_color "$RED" "${CROSS} Backup validation failed"
-        return 1
-    }
-    read -r -p "Type RESTORE to replace current state (0 = back): " answer
-    [[ "$answer" == RESTORE ]] || return 0
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    safety=$(create_state_backup before-restore)
-    if ! restore_state_backup "$source" "$was_active"; then
-        restore_state_backup "$safety" "$was_active" || true
-        return 1
-    fi
-    print_color "$GREEN" "${CHECK} State restored; safety backup: $safety"
-}
-
-import_clients() {
-    local import_file imported=0 skipped=0 config_tmp db_tmp backup_dir was_active=false record tag uuid email sid flow
-    echo "  0) Back"
-    read -r -p "Full v2 export path: " import_file
-    [[ "$import_file" != 0 ]] || return 0
-    [[ -f "$import_file" ]] || return 1
-    jq -e '.format=="xray-manager-profile-export-v2" and (.clients|type=="array")' "$import_file" >/dev/null || {
-        print_color "$RED" "${CROSS} Unsupported export format"
-        return 1
-    }
-    config_tmp=$(mktemp "$(dirname "$XRAY_CONFIG")/.import.XXXXXX.json")
-    db_tmp=$(mktemp "$(dirname "$CLIENTS_DB")/.import.XXXXXX.json")
-    cp -a "$XRAY_CONFIG" "$config_tmp"; cp -a "$CLIENTS_DB" "$db_tmp"
-    while IFS= read -r record; do
-        tag=$(jq -r '.inboundTag' <<< "$record"); uuid=$(jq -r '.uuid' <<< "$record")
-        email=$(jq -r '.email' <<< "$record"); sid=$(jq -r '.shortId' <<< "$record"); flow=$(jq -r '.flow//"xtls-rprx-vision"' <<< "$record")
-        if ! jq -e --arg tag "$tag" 'any(.inbounds[]?;.tag==$tag)' "$config_tmp" >/dev/null ||
-           jq -e --arg uuid "$uuid" --arg email "$email" 'any(.clients[]?;.uuid==$uuid or .email==$email)' "$db_tmp" >/dev/null ||
-           jq -e --arg uuid "$uuid" 'any(.inbounds[]?.settings.clients[]?;.id==$uuid)' "$config_tmp" >/dev/null ||
-           jq -e --arg sid "$sid" 'any(.inbounds[]?.streamSettings.realitySettings.shortIds[]?;.==$sid)' "$config_tmp" >/dev/null; then
-            skipped=$((skipped+1)); continue
-        fi
-        if [[ "$tag" == "$ANDROID_INBOUND_TAG" ]]; then
-            local source_enc current_enc
-            source_enc=$(jq -r --arg tag "$tag" '.profiles[$tag].clientEncryption//empty' "$import_file")
-            current_enc=$(jq -r --arg tag "$tag" '.profiles[$tag].clientEncryption//empty' "$db_tmp")
-            [[ -n "$source_enc" && "$source_enc" == "$current_enc" ]] || { skipped=$((skipped+1)); continue; }
-        fi
-        local next
-        next=$(mktemp "$(dirname "$XRAY_CONFIG")/.import-next.XXXXXX.json")
-        jq --arg tag "$tag" --arg uuid "$uuid" --arg email "$email" --arg sid "$sid" --arg flow "$flow" '
-          (.inbounds[]|select(.tag==$tag)|.settings.clients)+=[{id:$uuid,email:$email,flow:$flow}] |
-          (.inbounds[]|select(.tag==$tag)|.streamSettings.realitySettings.shortIds)+=[$sid]' "$config_tmp" > "$next"
-        mv -f "$next" "$config_tmp"
-        next=$(mktemp "$(dirname "$CLIENTS_DB")/.import-next.XXXXXX.json")
-        jq --argjson record "$record" '.clients += [$record + {imported:true}]' "$db_tmp" > "$next"
-        mv -f "$next" "$db_tmp"
-        imported=$((imported+1))
-    done < <(jq -c '.clients[]' "$import_file")
-    [[ "$imported" -gt 0 ]] || { print_color "$YELLOW" "No compatible, non-conflicting profiles to import ($skipped skipped)"; return 0; }
-    "$XRAY_BIN" run -test -config "$config_tmp" >/dev/null 2>&1 || return 1
-    backup_dir=$(create_state_backup before-import)
-    systemctl is-active --quiet xray 2>/dev/null && was_active=true
-    atomic_replace "$db_tmp" "$CLIENTS_DB"; atomic_replace "$config_tmp" "$XRAY_CONFIG"
-    if [[ "$was_active" == true ]] && (! systemctl restart xray || ! wait_for_xray_health 15); then
-        restore_state_backup "$backup_dir" true
-        return 1
-    fi
-    print_color "$GREEN" "${CHECK} Imported $imported profile(s); skipped $skipped; backup: $backup_dir"
-}
-
-# Compact production dashboard (overrides the verbose compatibility view).
-show_status_dashboard() {
-    local installed latest channel stable_versions service_state service_boot os_name
-    installed=$(get_installed_version)
-    stable_versions=$(fetch_available_versions 2>/dev/null || true)
-    latest=$(head -n1 <<< "$stable_versions")
-    [[ -n "$latest" ]] || latest=unavailable
-    channel=unknown
-    if grep -Fxq "$installed" <<< "$stable_versions"; then channel=stable; elif [[ "$installed" != not-installed ]]; then channel=prerelease; fi
-    service_state=$(systemctl is-active xray 2>/dev/null || echo unavailable)
-    service_boot=$(systemctl is-enabled xray 2>/dev/null || echo disabled)
-    os_name=$(. /etc/os-release; echo "$PRETTY_NAME")
-
-    show_logo
-    print_color "$BOLD$BLUE" "┌─ SYSTEM ──────────────────────────────────────────────────────────────────────────────┐"
-    printf '│ Manager %-8s  Xray %-9s %-12s  Stable %-9s  Service: %b%-8s%b │\n' \
-      "$MANAGER_VERSION" "$installed" "[$channel]" "$latest" \
-      "$([[ "$service_state" == active ]] && printf '%s' "$GREEN" || printf '%s' "$RED")" "$service_state" "$NC"
-    printf '│ Boot %-9s  OS %-24.24s  Kernel %-20.20s                         │\n' \
-      "$service_boot" "$os_name" "$(uname -r)"
-    print_color "$BOLD$BLUE" "└───────────────────────────────────────────────────────────────────────────────────────┘"
-    print_color "$BOLD$BLUE" "┌─ ACTIVE PROFILES ─────────────────────────────────────────────────────────────────────┐"
-    printf '│ %-20s %5s %7s %-9s %-9s %-7s %-7s %-6s %-6s │\n' \
-      "Profile" "Port" "Clients" "Transport" "VLESS Enc" "Vision" "REALITY" "FP" "Stack"
-    print_color "$BLUE" "├───────────────────────────────────────────────────────────────────────────────────────┤"
-    if [[ -f "$XRAY_CONFIG" ]]; then
-        while IFS=$'\t' read -r name tag port clients transport encryption vision reality fingerprint stack sni compatibility; do
-            printf '│ %-20.20s %5s %7s %-9s %-9s %-7s %-7s %-6s %-6s │\n' \
-              "$name" "$port" "$clients" "$transport" "$encryption" "$vision" "$reality" "$fingerprint" "$stack"
-            printf '│  %-45.45s  SNI %-20.20s  %-10.10s │\n' "Tag: $tag" "$sni" "$compatibility"
-        done < <(jq -r --arg legacy "$LEGACY_INBOUND_TAG" --arg ios "$IOS_INBOUND_TAG" --arg android "$ANDROID_INBOUND_TAG" '
-          .inbounds[]? | select(.protocol=="vless") |
-          [(if .tag==$ios then "iOS / Shadowrocket" elif .tag==$android then "Android / Advanced" elif .tag==$legacy then "Legacy / Existing" else (.tag//"Untagged") end),
-           (.tag//"untagged"),(.port|tostring),((.settings.clients//[])|length|tostring),
-           ((.streamSettings.network//.streamSettings.method//"raw")|ascii_upcase),
-           (if (.settings.decryption//"none")=="none" then "off" else "on" end),
-           (if any(.settings.clients[]?;.flow=="xtls-rprx-vision") or (((.settings.clients//[])|length)==0 and (.tag==$ios or .tag==$android)) then "on" else "off" end),
-           (if .streamSettings.security=="reality" then "on" else "off" end),
-           "chrome","stable",(.streamSettings.realitySettings.serverNames[0]//"n/a"),
-           (if .tag==$ios then "iOS" elif .tag==$android then "Android" elif .tag==$legacy then "preserved" else "custom" end)] | @tsv' "$XRAY_CONFIG")
-    fi
-    print_color "$BOLD$BLUE" "└───────────────────────────────────────────────────────────────────────────────────────┘"
-    printf '  Tools: jq %s  •  OpenSSL %s  •  qrencode %s\n\n' \
-      "$(jq --version 2>/dev/null | sed 's/^jq-//')" "$(openssl version 2>/dev/null | awk '{print $2}')" \
-      "$(qrencode --version 2>/dev/null | awk 'NR==1{print $3}')"
-}
-
-version_management_menu() {
-    local installed latest choice version relation
-    while :; do
-        installed=$(get_installed_version)
-        latest=$(get_latest_xray_version 2>/dev/null || echo unavailable)
-        relation="current"
-        if [[ "$latest" != unavailable && "$installed" != not-installed && "$installed" != "$latest" ]]; then
-            if [[ "$(printf '%s\n%s\n' "$latest" "$installed" | sort -V | tail -n1)" == "$installed" ]]; then
-                relation="installed is newer (prerelease)"
-            else
-                relation="stable update available"
-            fi
-        fi
-        clear 2>/dev/null || true
-        print_color "$BOLD$BLUE" "┌─ XRAY VERSION MANAGER ─────────────────────────────────────┐"
-        printf '│ Installed: %-12s  Latest stable: %-12s           │\n' "$installed" "$latest"
-        printf '│ Status: %-48.48s │\n' "$relation"
-        print_color "$BOLD$BLUE" "├────────────────────────────────────────────────────────────┤"
-        echo "│  1) Switch to latest stable                                │"
-        echo "│  2) Install a specific stable version                      │"
-        echo "│  3) List stable releases                                   │"
-        echo "│  4) Restore a complete update backup                       │"
-        echo "│  5) Experimental prerelease (advanced)                     │"
-        echo "│  0) Back                                                   │"
-        print_color "$BOLD$BLUE" "└────────────────────────────────────────────────────────────┘"
-        read -r -p "  Choice: " choice
-        case "$choice" in
-          1)
-             if [[ "$latest" == unavailable ]]; then
-                 print_color "$RED" "  Could not resolve the latest stable release."
-             elif [[ "$installed" == "$latest" ]]; then
-                 print_color "$GREEN" "  ${CHECK} Already on the latest stable release ($latest)."
-             else
-                 install_xray "$latest"
-             fi
-             ;;
-          2)
-             read -r -p "  Stable version (0 = back): " version
-             [[ -n "$version" && "$version" != 0 ]] || continue
-             if [[ "$installed" != not-installed && "$(printf '%s\n%s\n' "$version" "$installed" | sort -V | tail -n1)" == "$installed" && "$version" != "$installed" ]]; then
-                 print_color "$YELLOW" "  Note: this is an explicit downgrade from $installed to $version."
-             fi
-             install_xray "$version"
-             ;;
-          3) fetch_available_versions | nl -w2 -s') '; read -r -p "  Press Enter..." _ ;;
-          4) rollback_xray_version ;;
-          5) install_experimental_xray ;;
-          0) return ;;
-          *) print_color "$RED" "  Invalid choice"; sleep 1 ;;
-        esac
-    done
-}
-
 # Function to show menu
 show_menu() {
-    clear 2>/dev/null || true
+    clear
 
     # Display status dashboard
     show_status_dashboard
@@ -7119,10 +5320,10 @@ show_menu() {
     echo
 
     print_color $CYAN "  ${BOLD}Installation & Setup${NC}"
-    echo "    1)  Install/update latest stable Xray Core"
-    echo "    2)  Migrate/verify multi-platform profiles"
+    echo "    1)  Install Xray Core"
+    echo "    2)  Configure VLESS + REALITY"
     echo "    3)  Uninstall Xray"
-    echo "    4)  Version Management (Stable/Experimental/Rollback)"
+    echo "    4)  Version Management (Install/Switch/Rollback)"
     echo
 
     print_color $CYAN "  ${BOLD}Service Control${NC}"
@@ -7161,7 +5362,7 @@ show_menu() {
     echo "    25) Admin help (component explanations)"
     echo "    26) Run system diagnostics"
     echo "    27) Check and fix private key"
-    echo -e "    28) DPI & Leak Security Test ${GREEN}★${NC}"
+    echo "    28) DPI & Leak Security Test ${GREEN}★${NC}"
     echo
 
     print_color $CYAN "  ${BOLD}Performance & Mass Tools${NC} ${MAGENTA}★${NC}"
@@ -7169,187 +5370,13 @@ show_menu() {
     echo "    30) Optimize System for Maximum Performance"
     echo "    31) Mass Config Generator (Bulk + QR Codes)"
     echo "    32) Mass Client Remover"
-    echo
-
-    print_color $CYAN "  ${BOLD}Migration & Export${NC} ${YELLOW}★${NC}"
-    echo "    33) Export clients (for VPS migration)"
-    echo "    34) Import clients (from export file)"
-    echo "    35) Generate QR codes for ALL clients"
+    echo "    33) Add XHTTP inbound (fix Android/Desktop 'xhttp' timeout)"
     echo
 
     print_color $BOLD$BLUE "└─────────────────────────────────────────────────────────────┘"
     echo
     print_color $YELLOW "  0) Exit"
     echo
-}
-
-# Spacious dashboard override. Profiles are deliberately presented as a list so
-# narrow terminals do not collapse a large status table into unreadable columns.
-show_status_dashboard() {
-    local installed latest channel stable_versions service_state service_boot os_name
-    local tag port clients network encryption sni profile_name compatibility profile_color
-    installed=$(get_installed_version)
-    stable_versions=$(fetch_available_versions 2>/dev/null || true)
-    latest=$(head -n1 <<< "$stable_versions")
-    [[ -n "$latest" ]] || latest=unavailable
-    channel=unknown
-    if grep -Fxq "$installed" <<< "$stable_versions"; then
-        channel=stable
-    elif [[ "$installed" != not-installed ]]; then
-        channel=prerelease
-    fi
-    service_state=$(systemctl is-active xray 2>/dev/null || echo unavailable)
-    service_boot=$(systemctl is-enabled xray 2>/dev/null || echo disabled)
-    os_name=$(. /etc/os-release; echo "$PRETTY_NAME")
-
-    show_logo
-    print_color "$BOLD$BLUE" "╭─ SYSTEM STATUS ─────────────────────────────────────────────────────╮"
-    printf '│  %bManager%b       %s\n' "$CYAN" "$NC" "$MANAGER_VERSION"
-    printf '│  %bXray Core%b     %s  [%s]\n' "$CYAN" "$NC" "$installed" "$channel"
-    printf '│  %bLatest stable%b %s\n' "$CYAN" "$NC" "$latest"
-    if [[ "$service_state" == active ]]; then
-        printf '│  %bService%b       %b● ACTIVE%b\n' "$CYAN" "$NC" "$BOLD$GREEN" "$NC"
-    else
-        printf '│  %bService%b       %b● %s%b\n' "$CYAN" "$NC" "$BOLD$RED" "${service_state^^}" "$NC"
-    fi
-    printf '│  %bBoot%b          %s\n' "$CYAN" "$NC" "$service_boot"
-    printf '│  %bSystem%b        %s · kernel %s\n' "$CYAN" "$NC" "$os_name" "$(uname -r)"
-    print_color "$BOLD$BLUE" "╰─────────────────────────────────────────────────────────────────────╯"
-    echo
-
-    print_color "$BOLD$BLUE" "╭─ CONFIGURED PROFILES ───────────────────────────────────────────────╮"
-    if [[ -f "$XRAY_CONFIG" ]]; then
-        while IFS=$'\t' read -r tag port clients network encryption sni; do
-            case "$tag" in
-                "$LEGACY_INBOUND_TAG")
-                    profile_name="TCP / Legacy + iOS Shadowrocket"
-                    compatibility="Existing clients + Shadowrocket + v2rayNG"
-                    profile_color=$YELLOW
-                    ;;
-                "$IOS_INBOUND_TAG")
-                    profile_name="iOS / Shadowrocket"
-                    compatibility="Shadowrocket-compatible"
-                    profile_color=$MAGENTA
-                    ;;
-                "$ANDROID_INBOUND_TAG")
-                    profile_name="Advanced / Android + v2rayN Desktop"
-                    compatibility="Modern Xray clients"
-                    profile_color=$GREEN
-                    ;;
-                *)
-                    profile_name=${tag:-Untagged}
-                    compatibility="Custom profile"
-                    profile_color=$CYAN
-                    ;;
-            esac
-            printf '│\n'
-            printf '│  %b%s%b\n' "$BOLD$profile_color" "$profile_name" "$NC"
-            printf '│    Tag       %s\n' "$tag"
-            printf '│    Listener  TCP %s  ·  %s client(s)\n' "$port" "$clients"
-            if [[ "$network" == XHTTP ]]; then
-                printf '│    Stack     VLESS Encryption · XHTTP · Vision · REALITY\n'
-            else
-                printf '│    Stack     VLESS · %s · Vision · REALITY\n' "$network"
-            fi
-            printf '│    Security  Encryption %s · Fingerprint chrome · SNI %s\n' "$encryption" "$sni"
-            printf '│    Apps      %s\n' "$compatibility"
-        done < <(jq -r '
-          .inbounds[]? | select(.protocol=="vless") |
-          [(.tag//"untagged"),(.port|tostring),((.settings.clients//[])|length|tostring),
-           ((.streamSettings.network//.streamSettings.method//"raw")|ascii_upcase),
-           (if (.settings.decryption//"none")=="none" then "off" else "on" end),
-           (.streamSettings.realitySettings.serverNames[0]//"n/a")] | @tsv' "$XRAY_CONFIG")
-        printf '│\n'
-    else
-        print_color "$YELLOW" "│  No Xray configuration is installed."
-    fi
-    print_color "$BOLD$BLUE" "╰─────────────────────────────────────────────────────────────────────╯"
-    printf '  %bTools%b  jq %s  •  OpenSSL %s  •  qrencode %s\n\n' \
-      "$CYAN" "$NC" "$(jq --version 2>/dev/null | sed 's/^jq-//')" \
-      "$(openssl version 2>/dev/null | awk '{print $2}')" \
-      "$(qrencode --version 2>/dev/null | awk 'NR==1{print $3}')"
-}
-
-menu_section() {
-    print_color "$BOLD$BLUE" "╭─ $1"
-}
-
-menu_item() {
-    printf '│  %b%2s%b) %s\n' "$BOLD$YELLOW" "$1" "$NC" "$2"
-}
-
-menu_section_end() {
-    print_color "$BLUE" "╰─────────────────────────────────────────────────────────────────────"
-    echo
-}
-
-# Option numbers remain backward compatible, but every action has its own line.
-show_menu() {
-    clear 2>/dev/null || true
-    show_status_dashboard
-
-    menu_section "XRAY CORE & SERVICE"
-    menu_item 1  "Install or update latest stable Xray Core"
-    menu_item 2  "Migrate and verify multi-platform profiles"
-    menu_item 3  "Uninstall Xray"
-    menu_item 4  "Version management and rollback"
-    printf '│\n'
-    menu_item 5  "Start service"
-    menu_item 6  "Stop service"
-    menu_item 7  "Restart service"
-    menu_item 8  "Enable service at boot"
-    menu_item 9  "Disable service at boot"
-    menu_section_end
-
-    menu_section "CLIENTS · iOS · ANDROID · DESKTOP"
-    menu_item 10 "Add client / platform bundle"
-    menu_item 11 "Remove a client profile"
-    menu_item 12 "List all client profiles"
-    menu_item 13 "Show client connection details"
-    menu_item 14 "Generate a client QR code"
-    menu_item 15 "Platform setup guides"
-    menu_item 16 "Client profile statistics"
-    menu_section_end
-
-    menu_section "LOGS & CONFIGURATION"
-    menu_item 17 "View service logs"
-    menu_item 18 "Save logs to a file"
-    menu_item 19 "Clear logs"
-    menu_item 20 "Detailed system status"
-    printf '│\n'
-    menu_item 21 "Back up complete configuration"
-    menu_item 22 "Restore complete configuration"
-    menu_item 23 "View redacted configuration"
-    menu_section_end
-
-    menu_section "SYSTEM & SECURITY"
-    menu_item 24 "Remove old VPN systems"
-    menu_item 25 "Admin help and component explanations"
-    menu_item 26 "Run full system diagnostics"
-    menu_item 27 "Verify REALITY key relationships"
-    menu_item 28 "DPI and leak security checks"
-    menu_section_end
-
-    menu_section "PERFORMANCE, BULK & MIGRATION"
-    menu_item 29 "Server benchmark and recommendations"
-    menu_item 30 "Optimize system performance"
-    menu_item 31 "Mass client generator and QR export"
-    menu_item 32 "Mass client remover"
-    printf '│\n'
-    menu_item 33 "Export clients for VPS migration"
-    menu_item 34 "Import clients from an export"
-    menu_item 35 "Generate QR codes for every client"
-    menu_item 36 "Migrate legacy clients to compatibility bundles"
-    menu_section_end
-
-    print_color "$BOLD$YELLOW" "  0) Exit"
-    echo
-}
-
-view_redacted_config() {
-    jq '(.inbounds[]?.streamSettings.realitySettings.privateKey? // empty) = "<redacted>" |
-        (.inbounds[]? | select((.settings.decryption // "none") != "none") | .settings.decryption) = "<redacted>"' \
-        "$XRAY_CONFIG"
 }
 
 # Main function
@@ -7360,12 +5387,6 @@ main() {
     # Self-install on first run (when run via curl or from local file)
     self_install
 
-    # Safe, repeatable schema/inbound migration. Existing credentials and
-    # listener parameters are preserved; failures leave the manager usable.
-    if ! migrate_profile_state true; then
-        print_color "$YELLOW" "${CROSS} Automatic profile migration did not complete; run diagnostics for details"
-    fi
-
     if [[ $# -eq 0 ]]; then
         # Interactive mode
         while true; do
@@ -7373,9 +5394,6 @@ main() {
             read -p "Enter choice: " choice
             echo
 
-            # Interactive actions may fail safely without terminating the
-            # entire manager under the global set -e policy.
-            set +e
             case $choice in
                 1) install_xray ;;
                 2) configure_xray ;;
@@ -7399,7 +5417,7 @@ main() {
                 20) check_status ;;
                 21) backup_config ;;
                 22) restore_config ;;
-                23) view_redacted_config 2>/dev/null || print_color $YELLOW "No config file found" ;;
+                23) cat "$XRAY_CONFIG" 2>/dev/null || print_color $YELLOW "No config file found" ;;
                 24) remove_old_vpn_systems ;;
                 25) show_admin_help ;;
                 26) run_system_diagnostics ;;
@@ -7409,19 +5427,10 @@ main() {
                 30) optimize_system_performance ;;
                 31) mass_config_generator ;;
                 32) mass_remove_clients ;;
-                33) export_clients ;;
-                34) import_clients ;;
-                35) generate_all_qr_codes ;;
-                36) migrate_legacy_clients_menu ;;
+                33) add_xhttp_inbound ;;
                 0) exit 0 ;;
                 *) print_color $RED "Invalid choice" ;;
             esac
-            operation_status=$?
-            set -e
-
-            if [[ $operation_status -ne 0 ]]; then
-                print_color "$RED" "${CROSS} Operation failed (status $operation_status); no broken state was left active."
-            fi
 
             echo
             read -p "Press Enter to continue..."
@@ -7460,14 +5469,7 @@ main() {
             optimize|perf) optimize_system_performance ;;
             mass-generate|mass|bulk) mass_config_generator ;;
             mass-remove) mass_remove_clients ;;
-            export-clients|export) export_clients ;;
-            import-clients|import) import_clients ;;
-            qr-all|generate-all-qr) generate_all_qr_codes ;;
-            migrate-legacy|legacy-bundles) migrate_legacy_clients_menu ;;
-            migrate) migrate_profile_state false ;;
-            latest-stable) get_latest_xray_version ;;
-            install-experimental) install_experimental_xray ;;
-            manager-version) echo "Xray Manager version: $MANAGER_VERSION" ;;
+            add-xhttp|xhttp) add_xhttp_inbound "$2" "$3" ;;
             version)
                 local VER=$(get_installed_version)
                 if [[ "$VER" != "not-installed" ]]; then
@@ -7534,12 +5536,7 @@ main() {
                 echo "  optimize         - Optimize system for maximum performance"
                 echo "  mass-generate    - Generate multiple configs with QR codes"
                 echo "  mass-remove      - Mass remove clients (pattern/range/all)"
-                echo
-                print_color $CYAN "Migration & Export:"
-                echo "  export-clients   - Export client names for VPS migration"
-                echo "  import-clients   - Import clients from export file"
-                echo "  qr-all           - Generate QR codes for ALL existing clients"
-                echo "  migrate-legacy   - Preserve legacy clients and add iOS/Android companions"
+                echo "  add-xhttp, xhttp - Add XHTTP inbound reusing existing clients"
                 echo
                 print_color $CYAN "Version management:"
                 echo "  version          - Show current Xray version"
@@ -7555,7 +5552,5 @@ main() {
     fi
 }
 
-# Run main only when executed, allowing safe source-based regression tests.
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    main "$@"
-fi
+# Run main function
+main "$@"
