@@ -2,7 +2,7 @@
 
 PhantomVLESS is a single-file Bash manager for operating **Xray Core** on a Linux VPS with **VLESS**, **XTLS-Vision**, **REALITY**, and platform-focused client profiles.
 
-The current manager version is **3.3.1**.
+The current manager version is **3.3.2**.
 
 ## Quick Install
 
